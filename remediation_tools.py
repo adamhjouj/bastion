@@ -3,8 +3,13 @@
 Unlike a WAF rule or an IP ban (which tape over the hole), these fix the hole.
 First tool: patch_vuln() raises DVWA's security level so the exploited module
 switches to its safe, parameterized/sanitized code path ("impossible" = DVWA's
-hardened source: prepared statements, CSRF tokens, output encoding). Real
-eradication, not a band-aid.
+hardened source: prepared statements, CSRF tokens, output encoding). Stronger
+than a WAF rule or IP ban for clients that use the server's level.
+
+# ponytail: DVWA picks the level per-request from the 'security' cookie, so a
+# client that PINS security=low bypasses this. Full eradication needs the proxy
+# to strip/override that cookie (proxy's job). This tool raises the server level
+# and confirms it; it is not a universal patch on its own.
 
 Exposed as an Anthropic tool (PATCH_VULN_TOOL) + a string-returning dispatch fn
 (do_patch_vuln) matching blue_agent.py's DISPATCH/TOOLS convention, so it can be
@@ -56,18 +61,17 @@ def patch_vuln(level="impossible", base_url=None):
         c.post("/security.php", data={"security": level, "seclev_submit": "Submit",
                                       "user_token": token})
         c.cookies.set("security", level)
+        # Confirm on the SAME session that did the POST. DVWA's level is
+        # per-session (cookie/$_SESSION), so a fresh login would read a
+        # different session's default and give a false confirmation — never
+        # cross-session confirm. If the read-back is unreadable we fail CLOSED
+        # (verified=False -> ok=False): a false "patched" is worse than a false
+        # "unconfirmed". In production patch_vuln talks directly to DVWA (no
+        # proxy), so this read-back does not flake.
         new = _read_level(c.get("/security.php").text)
-        if new is None:
-            # In-session read-back can flake behind a proxy (a block/redirect page
-            # instead of security.php). Confirm with a fresh login — reliable.
-            fresh = _login(base)
-            new = _read_level(fresh.get("/security.php").text)
-            fresh.close()
         c.close()
     except Exception as e:
         return {"ok": False, "requested": level, "error": str(e)}
-    # Strict: only ok if we read the new level back and it matched. For a
-    # remediation action, a false "patched" is worse than a false "unconfirmed".
     return {"ok": new == level, "level": new, "requested": level,
             "verified": new is not None}
 
@@ -80,8 +84,11 @@ def do_patch_vuln(level="impossible", **_):
             return f"patch_vuln failed: {r['error']}"
         return (f"patch_vuln unconfirmed: could not verify DVWA security is now "
                 f"'{r['requested']}' (read back {r.get('level')!r}) — retry or check manually.")
-    return (f"Vulnerability patched: DVWA security raised to '{r['level']}' — "
-            f"exploited module now uses its safe code path.")
+    return (f"DVWA security level raised to '{r['level']}' — the vulnerable module now "
+            f"serves its safe/parameterized code path for sessions using the server "
+            f"level. CAVEAT: DVWA reads a per-request 'security' cookie, so a client "
+            f"that pins security=low still hits the vulnerable path; pair with a proxy "
+            f"rule that strips/overrides the 'security' cookie for full eradication.")
 
 
 PATCH_VULN_TOOL = {
