@@ -10,11 +10,6 @@ services:
       retries: 9
     restart: unless-stopped
 
-  mailhog:
-    image: mailhog/mailhog
-    ports: ["8025:8025"]
-    restart: unless-stopped
-
   honeypot:
     image: bastion-app
     command: ["python", "honeypot_app.py"]
@@ -76,13 +71,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Independent email delivery: slow investigations cannot stall the outbox.
+  mail-worker:
+    image: bastion-app
+    command: ["python", "-u", "mail_worker.py"]
+    env_file: .env
+    environment:
+      BASTION_DATA_DIR: /app/data
+    volumes: ["bastion-data:/app/data"]
+    restart: unless-stopped
+
   blue:
     image: bastion-app
     command: ["sh", "-c", "python -u blue_agent.py 2>&1 | tee /app/data/logs/blue.log"]
     env_file: .env
     environment:
-      SMTP_HOST: mailhog
-      SMTP_PORT: "1025"
       DVWA_URL: http://dvwa:80
       ACTUATOR_URL: http://actuator:9010
       BASTION_DATA_DIR: /app/data
@@ -93,8 +96,6 @@ services:
       proxy:
         condition: service_started
       actuator:
-        condition: service_started
-      mailhog:
         condition: service_started
     restart: unless-stopped
 

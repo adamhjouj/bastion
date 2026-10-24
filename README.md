@@ -43,11 +43,41 @@ bash run.sh
 
 - Dashboard: http://localhost:8080/__dashboard
 - App: http://localhost:8080/
-- MailHog: http://localhost:8025
+- Email: Resend HTTPS API, delivered by the independent `mail-worker` service
 
 DeepSeek takes precedence over Anthropic when both keys are set. `.env` is loaded into the blue container by Compose; host Python commands do not automatically load it.
 
 **Current startup caveats:** proxy startup clears demo defenses/logs and bootstraps DVWA; the red agent's authentication helper also resets the database. Do not use this stack for data you need to preserve.
+
+## Email alerts (Resend only)
+
+There is no local email server, SMTP transport, or provider fallback. Configure your local `.env`:
+
+```env
+RESEND_API_KEY=your-new-resend-key
+ALERT_FROM="Bastion Alerts <alerts@bastion0.dev>"
+ALERT_TO=your-email@example.com
+```
+
+The sender domain must be verified for sending in Resend. Multiple recipients may be comma-separated. Do not commit `.env` or paste keys into chat.
+
+```sh
+# Host: install requirements, then validate without sending:
+python mail_worker.py --env-file .env --check
+# Send exactly one labeled synthetic test (does not run an attack or drain real alerts):
+python mail_worker.py --env-file .env --test
+# Run continuous delivery, independently of the investigator:
+python mail_worker.py --env-file .env
+
+# Docker: rebuild to include the new worker and remove the old local relay:
+docker compose up --build -d --remove-orphans
+# Test using the configured container environment:
+docker compose run --rm --no-deps mail-worker python mail_worker.py --test
+```
+
+Incidents and their outbox messages are committed atomically. The worker captures the sender/recipients/content at queue time and retries transient errors with the same Resend idempotency key. Invalid configuration and permanent provider refusals are recorded as `dead`; transport failures retry up to five attempts. Safe error messages and provider email IDs are stored in `mail_receipts` and mail health. `accepted` means Resend accepted the request—not inbox delivery. Use Resend's Emails log for delivered/bounced status; delivery webhooks are not implemented yet.
+
+The worker sends queued incidents in any mode, but `observe` does not create attack alerts. The synthetic test command works without a model key or an attack. It explicitly loads `.env`; normal host Python commands do not.
 
 ## Tools
 
@@ -63,7 +93,7 @@ Diversion precedes bans. Undivert an IP before expecting its ban to cut access. 
 ```sh
 uv venv
 uv pip install -r requirements.txt pytest
-.venv/bin/python -m pytest -q test_model_detection.py test_inspect.py
+.venv/bin/python -m pytest -q test_notifications.py test_proxy.py
 ```
 
 Legacy tests are a mix of scripts and pytest functions; some mutate module globals at import, and the old honeypot/rate-limit E2E tests exercise shims rather than the actual proxy. Do not treat a blanket test collection as isolated until those fixtures are standardized.

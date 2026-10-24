@@ -163,7 +163,7 @@ ENVIRONMENT = (
     "transactional state and enforces committed defenses on subsequent requests. "
     "Model classification may be inline or asynchronous according to deployment policy.\n"
     "Topology: attacker → proxy (:8080) → DVWA (:80). A honeypot decoy exists "
-    "for diversion; alert email is captured by MailHog. You reach DVWA's own container "
+    "for diversion; alert email is queued for Resend delivery. You reach DVWA's own container "
     "through an authenticated isolated actuator. Tools are named, validated and "
     "independently gated by deployment policy; you do not have Docker or shell access.\n"
     "A fast system-1 classifier (Jev), when configured, flags requests and may have ALREADY "

@@ -66,9 +66,10 @@ def test_budget_exhausted_returns_unavailable(monkeypatch):
     assert result["malicious"] is None and "budget" in result["error"]
 
 
-def test_api_error_returns_unavailable():
-    def boom(req):
+def test_api_error_returns_unavailable(monkeypatch):
+    def boom(*args, **kwargs):
         raise httpx.ConnectError("refused")
+    monkeypatch.setattr(classifier.httpx, "post", boom)
     result = classifier.classify_request({}, timeout=1)
     assert result["malicious"] is None
 

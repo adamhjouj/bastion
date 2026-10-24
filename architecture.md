@@ -67,7 +67,7 @@ The dashboard displays the latest 200 events and 400 actions, incidents, defense
 
 ## Demo infrastructure
 
-`docker-compose.yml` defines DVWA, proxy, blue, honeypot and MailHog. `run.sh` builds/starts the stack. Proxy startup waits for DVWA, runs bootstrap, resets logs/defenses and starts uvicorn through tee. Compose dependency order is not a readiness guarantee.
+`docker-compose.yml` defines DVWA, proxy, blue, honeypot, the actuator and an independent Resend mail worker. `run.sh` builds/starts the stack. Email uses only Resend's HTTPS API; there is no local mail server or SMTP fallback. The mail worker shares the durable outbox and does not wait for model investigations. It stores Resend acceptance IDs and safe errors, freezes message content at enqueue time and reuses provider idempotency keys on transient retries. Acceptance is not inbox delivery; delivery/bounce status is currently checked in Resend's email log, not via webhooks.
 
 `bootstrap_dvwa.authed_session` resets the database, logs in and selects low security. `red_agent.py` calls it at import and then runs one of two prompted lab objectives, SQL injection or command injection. Its tool does not yet enforce endpoint scope independently of the prompt.
 

@@ -7,7 +7,7 @@ Safety model (this is the whole point of the file):
     params; this module maps each tool to ONE fixed, arg-list subprocess call.
     No shell=True, ever — the model's input can never become a command.
   * Every target is a LOGICAL service name validated against ALLOWED_TARGETS
-    ({"dvwa"}). The agent cannot act on the proxy, on itself, on MailHog, or on
+    ({"dvwa"}). The agent cannot act on the proxy, on itself, on the mail worker, or on
     any container outside this compose project. This is the hard boundary.
   * kill_process can only kill a PID that is (a) a positive int, (b) currently
     running in the target, and (c) NOT in the boot-time baseline. So apache /

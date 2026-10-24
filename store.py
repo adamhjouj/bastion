@@ -59,6 +59,9 @@ def _open():
           id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL,
           data TEXT NOT NULL, attempts INTEGER DEFAULT 0, available REAL DEFAULT 0,
           status TEXT DEFAULT 'pending');
+        CREATE TABLE IF NOT EXISTS mail_receipts (
+          outbox_id INTEGER PRIMARY KEY, provider TEXT, provider_id TEXT, status TEXT,
+          last_error TEXT, updated TEXT);
         CREATE TABLE IF NOT EXISTS budgets (name TEXT PRIMARY KEY, window INTEGER, used INTEGER);
         CREATE TABLE IF NOT EXISTS health (name TEXT PRIMARY KEY, ts TEXT, data TEXT);
     """)
@@ -264,26 +267,49 @@ def set_health(name, data):
 
 
 def queue_mail(key, incident):
+    from notifications import prepare_message
+    item = dict(redact(incident))
+    item["_mail"] = prepare_message(item)
     with connection(write=True) as db:
-        db.execute("INSERT OR IGNORE INTO outbox(key,data) VALUES(?,?)", (key, json.dumps(redact(incident))))
+        db.execute("INSERT OR IGNORE INTO outbox(key,data) VALUES(?,?)", (key, json.dumps(item)))
 
 
-def deliver_mail(send):
-    # Lease via available; single writer claims, failed sends retry, SMTP is at-least-once.
+def deliver_mail(send, key=None):
+    """Lease one message. Resend retries reuse the persisted idempotency key.
+
+    Optional key restricts a test run to its own message (never drains real alerts).
+    Accepted means the relay/API accepted the message, NOT inbox delivery.
+    """
+    from notifications import MailError
     with connection(write=True) as db:
-        row = db.execute("SELECT * FROM outbox WHERE status='pending' AND available<=? ORDER BY id LIMIT 1", (time.time(),)).fetchone()
+        row = db.execute("SELECT * FROM outbox WHERE status='pending' AND available<=? "
+                         "AND (? IS NULL OR key=?) ORDER BY id LIMIT 1", (time.time(), key, key)).fetchone()
         if not row:
-            return
+            return None
         db.execute("UPDATE outbox SET available=?,attempts=attempts+1 WHERE id=?", (time.time() + 60, row["id"]))
     try:
-        send(json.loads(row["data"]))
-    except Exception:
+        item = json.loads(row["data"])
+        item["_mail_key"] = row["key"]
+        result = send(item) or {"status": "accepted", "provider": "resend"}
+        result = {"status": "accepted", "provider": result.get("provider", "unknown"),
+                  "provider_id": result.get("provider_id")}
+    except Exception as exc:
+        retryable = not isinstance(exc, MailError) or exc.retryable
+        error = str(exc) if isinstance(exc, MailError) else "Unexpected mail transport failure"
+        delay = getattr(exc, "retry_after", None) or min(60 * 2 ** row["attempts"], 3600)
+        status = "dead" if not retryable or row["attempts"] >= 4 else "pending"
+        result = {"status": status, "error": error, "provider": "unknown"}
         with connection(write=True) as db:
-            db.execute("UPDATE outbox SET status=?,available=? WHERE id=?",
-                       ("dead" if row["attempts"] >= 4 else "pending", time.time() + 60, row["id"]))
+            db.execute("UPDATE outbox SET status=?,available=? WHERE id=?", (status, time.time() + delay, row["id"]))
+            db.execute("INSERT OR REPLACE INTO mail_receipts VALUES(?,?,?,?,?,?)",
+                       (row["id"], None, None, status, error, now()))
     else:
         with connection(write=True) as db:
-            db.execute("UPDATE outbox SET status='delivered' WHERE id=?", (row["id"],))
+            db.execute("UPDATE outbox SET status='accepted' WHERE id=?", (row["id"],))
+            db.execute("INSERT OR REPLACE INTO mail_receipts VALUES(?,?,?,?,?,?)",
+                       (row["id"], result["provider"], result["provider_id"], "accepted", None, now()))
+    set_health("mail", {"available": result["status"] == "accepted", **result})
+    return result
 
 
 def snapshot():

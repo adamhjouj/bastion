@@ -30,7 +30,8 @@ cat <<EOF
   Dashboard: http://localhost:8080/__dashboard
     Token:   set MANAGEMENT_TOKEN in your browser's Basic Auth or Authorization header
   App:       http://localhost:8080/
-  MailHog:   http://localhost:8025
+  Email:     Resend (configure RESEND_API_KEY, ALERT_FROM, ALERT_TO)
+  Test mail: docker compose run --rm --no-deps mail-worker python mail_worker.py --test
 
   Mode: $(grep -E '^BASTION_MODE=' .env | cut -d= -f2 || echo observe)
   Logs: docker compose logs -f proxy blue

@@ -4,11 +4,9 @@ import ipaddress
 import json
 import os
 import signal
-import smtplib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from email.message import EmailMessage
 
 from jsonschema import validate
 
@@ -18,6 +16,7 @@ import store
 from actuator_client import REGISTER as CONTROL_REGISTER
 from honeypot_tools import REGISTER as HONEYPOT_REGISTER
 from privacy import redact
+from notifications import send_email  # public compatibility import; delivery runs in mail_worker
 from security import DESTRUCTIVE
 from settings import Settings, real_key
 from tools import ENVIRONMENT, ORIENT_REGISTER, catalog
@@ -81,9 +80,10 @@ def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
     incident = redact({"ts": store.now(), "case_id": case_id, "severity": severity,
                        "attack_type": attack_type, "source_ip": source_ip,
                        "evidence": evidence[:2000], "summary": summary[:2000]})
-    # Idempotency belongs to execute_tool; SMTP is an explicitly at-least-once outbox.
-    store.append_jsonl(store.INCIDENTS_FILE, incident)
-    store.queue_mail(hashlib.sha256(json.dumps(incident, sort_keys=True).encode()).hexdigest(), incident)
+    # Persist the incident and its notification atomically; idempotency is owned by execute_tool.
+    with store.state_lock:
+        store.append_jsonl(store.INCIDENTS_FILE, incident)
+        store.queue_mail(hashlib.sha256(json.dumps(incident, sort_keys=True).encode()).hexdigest(), incident)
     return "Incident recorded; email queued (not yet delivered)"
 
 
@@ -234,21 +234,6 @@ def dispatch_swarm(client, events, create_kwargs):
         raise RuntimeError("one or more investigators failed") from errors[0]
 
 
-def send_email(incident):
-    report = "# Bastion incident\n\n" + json.dumps(incident, indent=2)
-    message = EmailMessage()
-    message["Subject"] = f"[{incident['severity']}] Bastion incident"
-    message["From"] = os.getenv("ALERT_FROM", "bastion@localhost")
-    message["To"] = os.getenv("ALERT_TO", "soc@example.com")
-    message["Message-ID"] = f"<{hashlib.sha256(report.encode()).hexdigest()}@bastion>"
-    message.set_content(report)
-    with smtplib.SMTP(os.getenv("SMTP_HOST", "mailhog"), int(os.getenv("SMTP_PORT", "1025")), timeout=5) as smtp:
-        if os.getenv("SMTP_USER"):
-            smtp.starttls()
-            smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-        smtp.send_message(message)
-
-
 def process_batch(events, policy, client=None, kwargs=None):
     cases = []
     for event in events:
@@ -307,7 +292,6 @@ def main():
     while not _STOP.is_set():
         try:
             process_batch(store.claim_events(limit=32, lease_seconds=180), policy, client, kwargs)
-            store.deliver_mail(send_email)
             if time.monotonic() - last_retention > 3600:
                 store.retain(int(os.getenv("RETENTION_DAYS", "30")))
                 last_retention = time.monotonic()
