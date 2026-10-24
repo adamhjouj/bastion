@@ -2,6 +2,7 @@
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import signal
 import threading
@@ -29,6 +30,7 @@ MAX_TOOLS = 16
 CASE_SECONDS = 60
 _STOP = threading.Event()
 _CONTEXT = threading.local()
+_LOG = logging.getLogger("bastion.blue")
 
 
 def do_blacklist_ip(ip, reason, expires=None):
@@ -123,12 +125,14 @@ SUPERVISOR_SYSTEM = SYSTEM + "\nCoordinate this possible multi-source campaign. 
 
 
 def record_action(tool, inp, result, outcome="ok", case_id=None):
+    _LOG.info("tool=%s outcome=%s case=%s", tool, outcome, case_id or getattr(_CONTEXT, "case_id", "unlinked"))
     store.append_jsonl(store.ACTIONS_FILE, {"ts": store.now(), "kind": "action", "tool": tool,
                        "input": redact(inp), "result": result if tool not in READ_ONLY else "read-only result omitted",
                        "outcome": outcome, "case_id": case_id or getattr(_CONTEXT, "case_id", None)})
 
 
 def record_triage(event, escalated, outcome):
+    _LOG.info("event=%s triage=%s escalated=%s", event["id"], outcome, bool(escalated))
     store.append_jsonl(store.ACTIONS_FILE, {"ts": store.now(), "kind": "triage", "case_id": str(event["id"]),
                        "ip": event.get("ip"), "path": event.get("path"), "jev": event.get("verdict"),
                        "escalated": escalated, "outcome": outcome})
@@ -140,9 +144,13 @@ def execute_tool(name, params, case_id):
             raise ValueError("unknown tool")
         validate(params, SCHEMAS[name])
         if name in DESTRUCTIVE and not Settings.from_env().allow_destructive:
-            return "REJECTED: deployment policy requires operator approval"
+            result = "REJECTED: deployment policy requires operator approval"
+            record_action(name, params, result, "rejected", case_id)
+            return result
     except Exception:
-        return "REJECTED: invalid tool or arguments"
+        result = "REJECTED: invalid tool or arguments"
+        record_action(name if name in DISPATCH else "unknown", params, result, "rejected", case_id)
+        return result
     key = hashlib.sha256(json.dumps([case_id, name, params], sort_keys=True).encode()).hexdigest()
 
     def perform():
@@ -282,12 +290,22 @@ def process_batch(events, policy, client=None, kwargs=None):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     policy = Settings.from_env().validate("blue")
+    _LOG.info("investigator started mode=%s", policy.mode)
     store.initialize()
     client, kwargs = llm.make_client()
     signal.signal(signal.SIGTERM, lambda *_: _STOP.set())
     signal.signal(signal.SIGINT, lambda *_: _STOP.set())
     store.set_health("blue", {"ready": True, "mode": policy.mode})
+    def heartbeat():
+        while not _STOP.wait(10):
+            try:
+                store.touch_health("blue")
+            except Exception:
+                _LOG.warning("investigator heartbeat could not be persisted")
+    pulse = threading.Thread(target=heartbeat, daemon=True, name="blue-heartbeat")
+    pulse.start()
     last_retention = 0
     while not _STOP.is_set():
         try:
@@ -299,7 +317,9 @@ def main():
         except Exception as exc:
             store.set_health("blue", {"ready": False, "error": type(exc).__name__})
         _STOP.wait(1)
+    pulse.join(timeout=2)
     store.set_health("blue", {"ready": False})
+    _LOG.info("investigator stopped")
 
 
 if __name__ == "__main__":

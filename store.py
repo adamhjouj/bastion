@@ -20,8 +20,6 @@ STATE_FILE = DATA / "state.json"
 EVENTS_FILE = DATA / "events.jsonl"
 INCIDENTS_FILE = DATA / "incidents.jsonl"
 ACTIONS_FILE = DATA / "actions.jsonl"
-LOGS = DATA / "logs"
-DVWA_LOG, PROXY_LOG, BLUE_LOG, RED_LOG = [LOGS / f"{n}.log" for n in ("dvwa", "proxy", "blue", "red")]
 DEFAULT_STATE = {"denylist": [], "honeypot": [], "seen_ips": {}}
 _local = threading.local()
 
@@ -64,6 +62,14 @@ def _open():
           last_error TEXT, updated TEXT);
         CREATE TABLE IF NOT EXISTS budgets (name TEXT PRIMARY KEY, window INTEGER, used INTEGER);
         CREATE TABLE IF NOT EXISTS health (name TEXT PRIMARY KEY, ts TEXT, data TEXT);
+        CREATE TABLE IF NOT EXISTS log_sources (
+          source TEXT PRIMARY KEY, container_id TEXT, status TEXT, message TEXT, updated TEXT);
+        CREATE TABLE IF NOT EXISTS service_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, container_id TEXT NOT NULL,
+          ts TEXT NOT NULL, stream TEXT NOT NULL, text TEXT NOT NULL, digest TEXT NOT NULL,
+          occurrence INTEGER NOT NULL, truncated INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(source,container_id,ts,stream,digest,occurrence));
+        CREATE INDEX IF NOT EXISTS source_log_idx ON service_logs(source,id);
     """)
     return db
 
@@ -200,10 +206,6 @@ def count_lines(path):
         return db.execute("SELECT COUNT(*) FROM records WHERE kind=?", (Path(path).stem,)).fetchone()[0]
 
 
-def tail_lines(path, n=120):
-    return []  # stdout lives in the container log driver, not pretend empty log files
-
-
 def claim_events(limit=32, lease_seconds=180):
     with connection(write=True) as db:
         db.execute("UPDATE records SET status='pending' WHERE kind='events' AND status='processing' AND lease<?", (time.time(),))
@@ -266,6 +268,11 @@ def set_health(name, data):
                    (name, now(), json.dumps(redact(data))))
 
 
+def touch_health(name):
+    with connection(write=True) as db:
+        db.execute("UPDATE health SET ts=? WHERE name=?", (now(), name))
+
+
 def queue_mail(key, incident):
     from notifications import prepare_message
     item = dict(redact(incident))
@@ -313,29 +320,8 @@ def deliver_mail(send, key=None):
 
 
 def snapshot():
-    st = load_state()
-    with connection() as db:
-        counts = {r["kind"]: r["n"] for r in db.execute("SELECT kind,COUNT(*) n FROM records GROUP BY kind")}
-        queue = {r["status"]: r["n"] for r in db.execute("SELECT status,COUNT(*) n FROM records WHERE kind='events' GROUP BY status")}
-        mail = {r["status"]: r["n"] for r in db.execute("SELECT status,COUNT(*) n FROM outbox GROUP BY status")}
-        health = {r["name"]: {"ts": r["ts"], **json.loads(r["data"])} for r in db.execute("SELECT * FROM health")}
-        triage = {"evaluated": 0, "flagged": 0, "escalated": 0, "actions": 0, "succeeded": 0}
-        for r in db.execute("SELECT data FROM records WHERE kind='actions'"):
-            a = json.loads(r[0])
-            if a.get("kind") == "triage":
-                triage["evaluated"] += 1
-                triage["flagged"] += bool((a.get("jev") or {}).get("malicious"))
-                triage["escalated"] += bool(a.get("escalated"))
-            elif a.get("kind") == "action":
-                triage["actions"] += 1
-                triage["succeeded"] += a.get("outcome") == "ok"
-        blocked = db.execute("SELECT COUNT(*) FROM records WHERE kind='events' AND json_extract(data,'$.blocked')=1").fetchone()[0]
-    return {"events": read_jsonl(EVENTS_FILE, 200)[::-1], "actions": read_jsonl(ACTIONS_FILE, 400)[::-1],
-            "incidents": read_jsonl(INCIDENTS_FILE, 100)[::-1], "events_total": counts.get("events", 0),
-            "incidents_total": counts.get("incidents", 0), "blocked_total": blocked,
-            "denylist": [d for d in st.get("denylist", []) if active_ban(d)],
-            "honeypot": st.get("honeypot", []), "enforced_security": st.get("enforced_security"),
-            "queue": queue, "mail": mail, "health": health, "funnel": triage, "logs": {}}
+    from dashboard_data import snapshot as dashboard_snapshot
+    return dashboard_snapshot()
 
 
 def retain(days=30):

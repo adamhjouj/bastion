@@ -15,7 +15,9 @@ This document describes implementation details. See [README.md](README.md) for s
 | Notification transport | `notifications.py` | Render incident emails and submit them to Resend |
 | Honeypot | `honeypot_app.py` | Serve a static decoy and record diverted traffic |
 | Store | `store.py` | Maintain shared defenses, durable queues, action records, budgets, and health |
-| Dashboard | `dashboard.html` | Render traffic, incidents, defenses, and agent activity |
+| Dashboard API | `dashboard_api.py`, `dashboard_data.py` | Versioned read-only queries, linked incident details, server metrics, SSE |
+| Log collector | `log_collector.py`, `log_store.py` | Follow allowlisted Compose stdout/stderr, redact and retain bounded cursor-addressable history |
+| Dashboard | `dashboard.html`, `static/` | Render traffic, health, incidents, defenses, email state, and live logs |
 
 Compose names the project `bastion`. The proxy, investigator, actuator, honeypot, and mail worker share the `bastion-data` volume. DVWA is the bundled target. Only the actuator service mounts the Docker socket.
 
@@ -37,9 +39,11 @@ After enforcement or forwarding, the proxy finalizes the event with the observed
 
 ## Management and source identity
 
-`/__dashboard`, `/__state`, `/__stream`, and `/__health` require `MANAGEMENT_TOKEN`. Clients may use Bearer authentication or HTTP Basic with username `admin`. Framework-generated API documentation routes are disabled.
+`/__dashboard`, `/__api/v1/*`, and `/__assets/*` require `MANAGEMENT_TOKEN`. Legacy `/__state`, `/__stream`, and `/__health` routes remain authenticated. Clients may use Bearer authentication or HTTP Basic with username `admin`. Framework-generated API documentation routes are disabled, and unknown management paths cannot fall through to the upstream application.
 
-The SSE endpoint checks snapshots once per second and emits a new snapshot on change. The browser falls back to polling if SSE fails. Snapshots include recent records, aggregate counts, active defenses, queue state, and component health. Console panes currently have no backing log stream; use Compose logs for service output.
+The dashboard consumes full overview snapshots once per second over SSE. Reconnecting resynchronizes the entire view; failed streams use polling while retrying SSE. Component heartbeat freshness is separate from transport connection status. Client rendering uses database identities, bounds displayed history, updates changed records, and uses DOM text APIs rather than HTML interpolation. Assets are separate ES modules and a stylesheet under a CSP without inline scripts/styles.
+
+The versioned read-only API exposes overview, paginated requests/actions/incidents/notifications, linked incident details, source metadata, log pages, and log SSE streams. Pagination uses `before` record IDs. Each log source uses an independent `after` cursor; SSE accepts `Last-Event-ID`. Pruned/reset history causes an explicit reset response. Invalid cursors and non-allowlisted sources are rejected before any query.
 
 Application-level source attribution uses the peer address unless the peer belongs to `TRUSTED_PROXY_CIDRS`. Trusted chains are processed from the nearest proxy outward. `DEMO_IDENTITY=1` explicitly enables first-hop X-Forwarded-For identity for lab traffic. Deployment must also account for the ASGI server's own proxy-header handling.
 
@@ -80,11 +84,25 @@ The active database is `bastion.db` under `BASTION_DATA_DIR`, using SQLite WAL w
 | `mail_receipts` | Resend acceptance IDs and safe delivery errors |
 | `budgets` | Per-window model and actuator call counters |
 | `health` | Latest component health reports |
+| `service_logs` | Bounded stdout/stderr entries with source, container identity, timestamps, and replay deduplication keys |
+| `log_sources` | Log reader connection state and heartbeat per service |
 | `meta` | Migration markers |
 
 Queue transitions are `receiving`, `pending`, `processing`, and finally `done` or `dead`. The `available` timestamp schedules retries; leases permit recovery from interrupted processing. The current schema does not assign an ownership token to a claim, so deployments should keep a single investigator and review lease duration before increasing concurrency.
 
 The legacy JSON/state files are backed up and imported once. Their path constants remain as stream identifiers for older tool interfaces; normal writes go to SQLite. Retention removes terminal records older than `RETENTION_DAYS`; it does not currently prune every auxiliary table or legacy backup.
+
+## Container log ingestion
+
+The actuator starts one supervised Docker log reader per allowlisted source: `blue`, `proxy`, `dvwa`, `honeypot`, `actuator`, `mail-worker`, and `red`. Discovery requires unique Compose project/service labels, independent of the destructive-action target allowlist. The proxy and browser read captured records from SQLite; no Docker log command is initiated by a browser request.
+
+Readers follow `docker logs --timestamps`, consume stdout/stderr concurrently, and use a bounded queue between pipe readers and persistence. Oversized lines are drained with bounded memory and marked truncated. Common credential assignments, known secret values available to the collector, API-key patterns, and terminal controls are removed before storage. This does not guarantee arbitrary free-text secret removal.
+
+First attachment reads up to 200 recent lines. Reattachment requests output since the source/container timestamp watermark; timestamp, stream, content digest, and occurrence distinguish replay from repeated identical messages. Each source retains at most `LOG_RETENTION_LINES` database entries, with 4096 characters per line. Containers retain two rotating 5 MB runtime log files under the supplied Compose configuration.
+
+Readers rediscover replaced containers and report missing, stopped, reconnecting, unavailable, and stale states. The optional red service is inactive until its profile is launched; host Python process output and file-only application logs are not automatically collected. Runtime rotation, clock regressions, bounded replay bookkeeping, and retention mean ingestion is not a lossless forensic archive.
+
+Compose runs proxy and investigator processes directly, without tee pipelines. Shared services explicitly build the base image; the actuator builds the Docker-CLI target. Collector tasks and child processes are shut down with the actuator lifecycle.
 
 ## Notifications
 
@@ -106,4 +124,6 @@ Pytest uses a temporary database per test and mocked HTTP transports. Coverage i
 
 `eval_waf.py` measures Jev against a small labeled dataset with precision/recall confidence intervals and optional repeated sampling. It is an evaluation utility, not a production detection-quality claim.
 
-Priority hardening areas are a verified Compose startup/shutdown workflow, explicit image build targets, resource/client lifecycle cleanup, queue lease ownership, broader network isolation, reliable historical dashboard metrics, and live provider/actuator integration tests. Keep the supplied stack local while those boundaries remain.
+Live Docker smoke tests verify stdout/stderr capture across all seven source names, replay without duplicates after restart, discovery after container recreation, and log-reader cleanup. A separate test runs the built proxy and actuator images against a shared isolated volume and checks that real container output reaches the authenticated dashboard API. Browser tests cover server totals, incident links, email updates, log switching/pause/resume, SSE recovery, and safe rendering. They do not launch attacks or call paid providers.
+
+Remaining hardening areas include full target-stack readiness across platforms, queue lease ownership, broader network isolation, scalable historical queries, and live provider/privileged-action validation. Keep the supplied stack local while those boundaries remain.

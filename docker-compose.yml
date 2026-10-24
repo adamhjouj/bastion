@@ -1,8 +1,21 @@
 name: bastion
 
+x-app: &app
+  image: bastion-app
+  build:
+    context: .
+    target: base
+  init: true
+  logging: &runtime-logging
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+
 services:
   dvwa:
     image: vulnerables/web-dvwa
+    logging: *runtime-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost/login.php"]
       interval: 10s
@@ -11,14 +24,14 @@ services:
     restart: unless-stopped
 
   honeypot:
-    image: bastion-app
+    <<: *app
     command: ["python", "honeypot_app.py"]
     environment:
       HONEYPOT_PORT: "9000"
       BASTION_DATA_DIR: /app/data
     volumes: ["bastion-data:/app/data"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9000/"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/', timeout=3)"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -27,9 +40,8 @@ services:
   # The ingress proxy enforces bans, rate limits, diversions and inline Jev.
   # It has no Docker socket. The management endpoints require MANAGEMENT_TOKEN.
   proxy:
-    build: .
-    image: bastion-app
-    command: ["sh", "-c", "./entrypoint-proxy.sh 2>&1 | tee /app/data/logs/proxy.log"]
+    <<: *app
+    command: ["./entrypoint-proxy.sh"]
     env_file: .env
     environment:
       DVWA_URL: http://dvwa:80
@@ -55,6 +67,8 @@ services:
       context: .
       target: actuator
     image: bastion-actuator
+    init: true
+    logging: *runtime-logging
     command: ["python", "-m", "uvicorn", "actuator_app:app", "--host", "0.0.0.0", "--port", "9010"]
     environment:
       BASTION_PROJECT: bastion
@@ -63,6 +77,7 @@ services:
       ACTUATOR_TOKEN: "${ACTUATOR_TOKEN}"
       DVWA_URL: http://dvwa:80
       ALLOW_DESTRUCTIVE: "${ALLOW_DESTRUCTIVE:-0}"
+      LOG_RETENTION_LINES: "${LOG_RETENTION_LINES:-1000}"
     volumes:
       - "bastion-data:/app/data"
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -73,7 +88,7 @@ services:
 
   # Independent email delivery: slow investigations cannot stall the outbox.
   mail-worker:
-    image: bastion-app
+    <<: *app
     command: ["python", "-u", "mail_worker.py"]
     env_file: .env
     environment:
@@ -82,8 +97,8 @@ services:
     restart: unless-stopped
 
   blue:
-    image: bastion-app
-    command: ["sh", "-c", "python -u blue_agent.py 2>&1 | tee /app/data/logs/blue.log"]
+    <<: *app
+    command: ["python", "-u", "blue_agent.py"]
     env_file: .env
     environment:
       DVWA_URL: http://dvwa:80
@@ -98,6 +113,16 @@ services:
       actuator:
         condition: service_started
     restart: unless-stopped
+
+  red:
+    <<: *app
+    profiles: ["red-team"]
+    command: ["python", "-u", "red_agent.py", "sqli"]
+    env_file: .env
+    environment:
+      PROXY_URL: http://proxy:8080
+      BASTION_DATA_DIR: /app/data
+    depends_on: [proxy]
 
 volumes:
   bastion-data:

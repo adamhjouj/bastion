@@ -11,6 +11,7 @@ from jsonschema import validate
 import actuator
 import remediation_tools
 import store
+from log_collector import DockerLogCollector
 from security import DESTRUCTIVE, authorize
 
 TOKEN = os.getenv("ACTUATOR_TOKEN", "")
@@ -32,8 +33,30 @@ async def lifespan(app):
     if len(TOKEN) < 32:
         raise ValueError("ACTUATOR_TOKEN must have at least 32 characters")
     store.initialize()
-    actuator.capture_baseline()
-    yield
+    collector = DockerLogCollector(actuator.PROJECT, actuator.DOCKER,
+                                   retention=int(os.getenv("LOG_RETENTION_LINES", "1000")))
+    await collector.start()
+    try:
+        try:
+            await asyncio.to_thread(actuator.capture_baseline)
+            store.set_health("actuator", {"ready": True, "baseline": True})
+        except Exception:
+            # Process termination already refuses absent/stale baselines. Log ingestion
+            # and other read-only diagnostics must remain available during target failure.
+            store.set_health("actuator", {"ready": True, "baseline": False})
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(10)
+                await asyncio.to_thread(store.touch_health, "actuator")
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            yield
+        finally:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+    finally:
+        await collector.close()
+        store.set_health("actuator", {"ready": False})
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, openapi_url=None, redoc_url=None)

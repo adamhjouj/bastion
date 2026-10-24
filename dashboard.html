@@ -1,424 +1,65 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bastion SOC</title>
-<style>
-  :root {
-    /* neutral base */
-    --bg:#0b0b0c; --surface:#131315; --surface-2:#0f0f11; --elev:#17171a;
-    --border:rgba(255,255,255,.07); --border-2:rgba(255,255,255,.12);
-    --text:#f1f1f2; --muted:#9a9aa1; --faint:#67676e;
-    /* intentional three-stop threat scale + neutral tokens kept for JS inline refs */
-    --red:#e05561; --amber:#caa24f; --green:#57b981;
-    --danger:var(--red); --warn:var(--amber); --success:var(--green);
-    --violet:#8b8f9e; --info:#8b8f9e; --primary:#eaeaec;
-    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-    --r:10px; --r-sm:7px; --r-xs:5px;
-  }
-  * { box-sizing:border-box; }
-  html,body { height:100%; }
-  body {
-    margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden;
-    background:var(--bg); color:var(--text);
-    font:13px/1.5 var(--sans); -webkit-font-smoothing:antialiased;
-  }
-  a { color:var(--text); text-decoration:none; }
-  ::selection { background:rgba(255,255,255,.16); }
-
-  /* ---- header ---- */
-  header { display:flex; align-items:center; gap:13px; padding:13px 20px; border-bottom:1px solid var(--border); }
-  .mark { width:27px; height:27px; border-radius:7px; display:grid; place-items:center;
-          background:var(--elev); border:1px solid var(--border-2); color:var(--text); flex:0 0 auto; }
-  .mark svg { width:15px; height:15px; }
-  .brand { display:flex; flex-direction:column; line-height:1.18; }
-  .brand .nm { font-size:13.5px; font-weight:600; letter-spacing:.2px; }
-  .brand .sub { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--faint); }
-  .conn { display:inline-flex; align-items:center; gap:7px; font-size:11px; font-weight:500;
-          padding:4px 10px; border-radius:999px; border:1px solid var(--border); color:var(--muted); }
-  .conn::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--faint); }
-  .conn.ok::before { background:var(--green); }
-  .conn.off { color:var(--muted); } .conn.off::before { background:var(--red); }
-  .clock { margin-left:auto; color:var(--muted); font-size:11.5px; letter-spacing:.3px; font-family:var(--mono); }
-
-  /* ---- stat strip: hairline-divided, flat ---- */
-  .stats { display:grid; grid-template-columns:repeat(6,1fr); gap:1px; background:var(--border);
-           border-bottom:1px solid var(--border); }
-  .stat { background:var(--bg); padding:14px 18px; }
-  .stat b { display:block; font-size:23px; font-weight:600; line-height:1.1; letter-spacing:-.6px;
-            font-variant-numeric:tabular-nums; color:var(--text); }
-  .stat span { display:block; margin-top:3px; color:var(--muted); font-size:10px; font-weight:500;
-               text-transform:uppercase; letter-spacing:1.1px; }
-  .bump { animation:bump .4s cubic-bezier(.2,.8,.2,1); }
-  @keyframes bump { 0%{transform:scale(1)} 34%{transform:scale(1.12)} 100%{transform:scale(1)} }
-
-  /* ---- funnel: flat, monochrome ---- */
-  .funnel { display:flex; align-items:stretch; padding:15px 20px; border-bottom:1px solid var(--border); }
-  .fstage { flex:1; position:relative; padding:0 18px; }
-  .fstage:first-child { padding-left:0; } .fstage:last-child { padding-right:0; }
-  .fstage:not(:last-child)::after { content:""; position:absolute; right:7px; top:50%; width:6px; height:6px;
-            border-top:1.5px solid var(--faint); border-right:1.5px solid var(--faint);
-            transform:translateY(-50%) rotate(45deg); }
-  .fstage .fn { font-size:20px; font-weight:600; letter-spacing:-.5px; font-variant-numeric:tabular-nums; color:var(--text); }
-  .fstage .fl { font-size:9.5px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin-top:2px; }
-  .fstage .bar { height:3px; border-radius:3px; margin-top:10px; background:rgba(255,255,255,.07); overflow:hidden; }
-  .fstage .bar > i { display:block; height:100%; width:0; border-radius:3px; background:var(--muted);
-            transition:width .6s cubic-bezier(.2,.8,.2,1); }
-  /* only the threat-bearing stages carry color, so the eye tracks escalation */
-  .f2 .bar > i{background:var(--amber)} .f3 .bar > i,.f4 .bar > i{background:var(--red)}
-
-  /* ---- layout ---- */
-  main { flex:1; min-height:0; display:grid; grid-template-columns:1.4fr 1fr; gap:13px; padding:13px 20px 16px; }
-  .col { display:flex; flex-direction:column; gap:13px; min-height:0; }
-  .box { background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
-         display:flex; flex-direction:column; min-height:0; }
-  .box > h2 { font-size:10px; text-transform:uppercase; letter-spacing:1.2px; color:var(--muted); font-weight:600;
-            margin:0; padding:11px 15px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:9px; }
-  .box > h2 .n { margin-left:auto; color:var(--faint); font-weight:500; letter-spacing:.2px; text-transform:none; font-size:11px; font-family:var(--mono); }
-  .box .body { overflow-y:auto; padding:4px 0; }
-  .feed { flex:1.6; } .console { flex:1.2; } .replay { flex:0 0 auto; }
-  .incidents { flex:1.2; } .defenses { flex:.9; } .actions { flex:1.1; }
-  .body::-webkit-scrollbar,.consolebody::-webkit-scrollbar{width:10px}
-  .body::-webkit-scrollbar-thumb,.consolebody::-webkit-scrollbar-thumb{
-     background:rgba(255,255,255,.12); border-radius:8px; border:3px solid transparent; background-clip:padding-box}
-  .body::-webkit-scrollbar-thumb:hover,.consolebody::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.2); background-clip:padding-box}
-
-  /* ---- request feed ---- */
-  .row { display:flex; align-items:center; gap:10px; padding:5px 15px; white-space:nowrap; overflow:hidden;
-         font-family:var(--mono); font-size:12px; border-left:2px solid transparent; }
-  .row .ip { color:var(--muted); } .row .pathtxt { overflow:hidden; text-overflow:ellipsis; color:var(--text); }
-  .row .meth { color:var(--faint); font-weight:600; }
-  .row.attack { background:rgba(224,85,97,.05); border-left-color:var(--red); }
-  .row.attack .pathtxt { color:#f0c3c7; }
-  .row.blocked { background:rgba(87,185,129,.045); border-left-color:var(--green); }
-  .tag { display:inline-block; font-size:10.5px; padding:1px 6px; border-radius:var(--r-xs); font-weight:600;
-         font-variant-numeric:tabular-nums; flex:0 0 auto; color:var(--muted); background:rgba(255,255,255,.06); }
-  .b200{color:var(--green)} .b403{color:var(--red)} .b302,.b500,.b502,.b404{color:var(--amber)}
-
-  /* ---- replay (outcome-framed: leaked = threat, blocked = defended) ---- */
-  .replay .body { padding:12px 15px; }
-  .rcard { border:1px solid var(--border); border-radius:var(--r-sm); padding:12px; margin-bottom:9px; background:var(--surface-2); }
-  .rcard:last-child { margin-bottom:0; }
-  .rcard .pl { font-family:var(--mono); color:var(--text); word-break:break-all; white-space:normal; margin-bottom:11px; font-size:12px; }
-  .rcard .ba { display:flex; align-items:center; gap:12px; }
-  .pill { flex:1; text-align:center; border-radius:var(--r-xs); padding:9px 6px; font-weight:600; letter-spacing:.3px;
-          font-size:12px; border:1px solid var(--border-2); }
-  .pill.leak { color:var(--red); } .pill.block { color:var(--green); }
-  .pill small { display:block; font-weight:500; color:var(--muted); font-size:10px; margin-top:3px; font-family:var(--mono); letter-spacing:0; }
-  .arrow { color:var(--faint); display:grid; place-items:center; flex:0 0 auto; } .arrow svg { width:17px; height:17px; }
-
-  /* ---- incidents ---- */
-  .inc { padding:11px 15px; border-bottom:1px solid var(--border); }
-  .inc:last-child { border-bottom:none; }
-  .inc .t { font-weight:600; display:flex; align-items:center; gap:8px; font-size:12.5px; }
-  .sev { font-size:9px; padding:2px 7px; border-radius:999px; font-weight:700; text-transform:uppercase; letter-spacing:.5px;
-         border:1px solid var(--border-2); color:var(--muted); }
-  .sev.medium{ color:var(--amber); border-color:rgba(202,162,79,.4); }
-  .sev.high{ color:var(--red); border-color:rgba(224,85,97,.45); }
-  .sev.critical{ color:#13131a; background:var(--red); border-color:var(--red); }
-  .inc .ip { color:var(--red); font-family:var(--mono); font-size:12px; }
-  .inc .meta { color:var(--muted); font-size:11.5px; margin-top:4px; }
-  .inc .ev { color:var(--muted); margin-top:7px; word-break:break-all; white-space:normal; font-size:11px; font-family:var(--mono);
-         background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:var(--r-xs); padding:6px 8px; }
-
-  /* ---- defenses + actions ---- */
-  .item { display:flex; align-items:baseline; gap:9px; padding:8px 15px; border-bottom:1px solid var(--border);
-          word-break:break-all; font-size:12px; }
-  .item:last-child { border-bottom:none; }
-  .item .iico { flex:0 0 auto; align-self:center; display:grid; place-items:center; }
-  .item .iico svg { width:14px; height:14px; display:block; }
-  .item .ip { color:var(--red); font-family:var(--mono); } .item .ban-ic { color:var(--red); }
-  .item .rx { color:var(--muted); font-family:var(--mono); } .item .rule-ic { color:var(--muted); }
-  .item .why { color:var(--muted); font-size:11px; margin-left:auto; text-align:right; max-width:52%; }
-  .act { padding:7px 15px; border-bottom:1px solid var(--border); display:flex; gap:9px; align-items:center;
-         white-space:nowrap; overflow:hidden; font-size:12px; }
-  .act:last-child { border-bottom:none; }
-  .act .abadge { font-size:9px; font-weight:700; letter-spacing:.5px; padding:2px 7px; border-radius:var(--r-xs);
-         flex:0 0 auto; border:1px solid var(--border-2); color:var(--muted); background:rgba(255,255,255,.04); }
-  .ab-ban{ color:var(--red); } .ab-alert{ color:var(--amber); } .ab-waf{ color:var(--green); }
-  .act .atxt { overflow:hidden; text-overflow:ellipsis; font-family:var(--mono); }
-  .act .adim { color:var(--muted); } .act .rx { color:var(--muted); }
-  .act .ok{color:var(--green)} .act .no{color:var(--faint)}
-
-  /* ---- console ---- */
-  .tabs { display:flex; gap:5px; }
-  .tab { font-size:10px; text-transform:uppercase; letter-spacing:.5px; font-weight:600; padding:3px 9px; border-radius:999px;
-         border:1px solid var(--border); color:var(--muted); cursor:pointer; background:transparent; transition:.15s; }
-  .tab:hover { color:var(--text); border-color:var(--border-2); }
-  .tab.on { color:var(--text); border-color:var(--border-2); background:rgba(255,255,255,.06); }
-  .consolebody { flex:1; overflow:auto; margin:0; padding:10px 15px; font-size:11.5px; line-height:1.6; font-family:var(--mono);
-                 color:#b4b4ba; white-space:pre-wrap; word-break:break-word; background:var(--surface-2);
-                 border-bottom-left-radius:var(--r); border-bottom-right-radius:var(--r); }
-  .empty { color:var(--faint); padding:15px; }
-  .enter { animation:enter .3s ease; }
-  @keyframes enter { from{opacity:0; transform:translateY(-5px)} to{opacity:1; transform:none} }
-
-  @media (max-width:1000px){
-    body { height:auto; overflow:auto; }
-    .stats{grid-template-columns:repeat(3,1fr)}
-    .funnel{flex-wrap:wrap; row-gap:14px} .fstage{flex:0 0 50%} .fstage:not(:last-child)::after{display:none}
-    main{grid-template-columns:1fr}
-  }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bastion SOC</title>
+  <link rel="stylesheet" href="/__assets/dashboard.css">
+  <script type="module" src="/__assets/app.js"></script>
 </head>
 <body>
 <header>
-  <div class="mark" aria-hidden="true">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 2.5 4.5 5.5v6c0 4.6 3.2 8 7.5 9.5 4.3-1.5 7.5-4.9 7.5-9.5v-6L12 2.5Z"/>
-      <path d="M9 12.2l2.2 2.2L15.5 10"/>
-    </svg>
-  </div>
-  <div class="brand">
-    <span class="nm">Bastion</span>
-    <span class="sub">Security Operations</span>
-  </div>
-  <span class="conn off" id="conn">connecting</span>
-  <span class="clock" id="clock"></span>
+  <div><h1>Bastion <span>Security Operations</span></h1></div>
+  <span id="mode" class="badge">Loading mode</span>
+  <span id="connection" class="badge" role="status">Connecting</span>
+  <time id="clock"></time>
 </header>
-
-<div class="stats">
-  <div class="stat req"><b id="s-req">0</b><span>requests</span></div>
-  <div class="stat blk"><b id="s-blk">0</b><span>blocked</span></div>
-  <div class="stat atk"><b id="s-atk">0</b><span>incidents</span></div>
-  <div class="stat ban"><b id="s-ban">0</b><span>IPs banned</span></div>
-  <div class="stat"><b id="s-divert">0</b><span>IPs diverted</span></div>
-  <div class="stat mttr"><b id="s-mttr">-</b><span>response time</span></div>
-</div>
-
-<div class="funnel" id="funnel">
-  <div class="fstage f0"><div class="fn" id="fn0">0</div><div class="fl">Requests</div><div class="bar"><i id="fb0"></i></div></div>
-  <div class="fstage f1"><div class="fn" id="fn1">0</div><div class="fl">Evaluated requests</div><div class="bar"><i id="fb1"></i></div></div>
-  <div class="fstage f2"><div class="fn" id="fn2">0</div><div class="fl">Jev malicious</div><div class="bar"><i id="fb2"></i></div></div>
-  <div class="fstage f3"><div class="fn" id="fn3">0</div><div class="fl">Escalated</div><div class="bar"><i id="fb3"></i></div></div>
-  <div class="fstage f4"><div class="fn" id="fn4">0</div><div class="fl">Actions taken</div><div class="bar"><i id="fb4"></i></div></div>
-</div>
-
+<div id="notice" class="notice" role="status" hidden></div>
+<section class="stats" aria-label="Retained history totals">
+  <div><b id="s-req">—</b><span>Requests</span></div>
+  <div><b id="s-blk">—</b><span>Requests stopped</span></div>
+  <div><b id="s-inc">—</b><span>Incidents</span></div>
+  <div><b id="s-ban">—</b><span>Active bans</span></div>
+  <div><b id="s-divert">—</b><span>Diverted sources</span></div>
+  <div><b id="s-response">—</b><span>Latest containment</span></div>
+</section>
+<section class="pipeline" aria-label="Processing summary">
+  <span id="p-evaluated">— evaluated</span><span id="p-flagged">— Jev flags</span>
+  <span id="p-escalated">— escalated</span><span id="p-tools">— successful tool calls</span>
+  <span class="muted">Totals cover retained history</span>
+</section>
 <main>
-  <div class="col">
-    <div class="box feed"><h2>Live request feed <span class="n" id="feed-n"></span></h2><div class="body" id="feed"></div></div>
-    <div class="box console">
-      <h2>Container &amp; server console
-        <span class="tabs" style="margin-left:auto">
-          <span class="tab on" data-src="blue">blue</span>
-          <span class="tab" data-src="proxy">proxy</span>
-          <span class="tab" data-src="dvwa">dvwa</span>
-          <span class="tab" data-src="red">red</span>
-        </span>
-      </h2>
-      <pre class="consolebody" id="console"></pre>
-    </div>
+  <div class="column">
+    <section class="panel health"><h2>System status <span id="queue-count"></span></h2><div id="health" class="health-grid"></div></section>
+    <section class="panel feed"><h2>Request feed <span id="feed-count"></span></h2><div id="feed" class="scroll" aria-live="off"><p class="empty">Loading requests…</p></div></section>
+    <section class="panel logs">
+      <h2>Container logs <span id="log-state" role="status">Connecting</span></h2>
+      <div class="toolbar">
+        <label>Source <select id="log-source">
+          <option value="blue">Investigator</option><option value="proxy">Proxy</option>
+          <option value="dvwa">DVWA</option><option value="honeypot">Honeypot</option>
+          <option value="actuator">Actuator</option><option value="mail-worker">Mail worker</option>
+          <option value="red">Red agent</option>
+        </select></label>
+        <button id="pause-logs" type="button" aria-pressed="false">Pause display</button>
+        <label><input id="follow-logs" type="checkbox" checked> Follow</label>
+      </div>
+      <p id="log-message" class="hint">Loading source status…</p>
+      <div id="log-lines" class="console" tabindex="0" aria-label="Container output"></div>
+      <p class="hint">Timestamped stdout/stderr · bounded history · common credentials redacted</p>
+    </section>
   </div>
-  <div class="col">
-    <div class="box replay"><h2>Exploit replay <span class="n">same payload, before / after</span></h2><div class="body" id="replay"></div></div>
-    <div class="box incidents"><h2>Incidents <span class="n" id="inc-n"></span></h2><div class="body" id="inc"></div></div>
-    <div class="box defenses"><h2>Active defenses <span class="n" id="def-n"></span></h2><div class="body" id="def"></div></div>
-    <div class="box actions"><h2>Agent action log <span class="n" id="act-n"></span></h2><div class="body" id="acts"></div></div>
+  <div class="column">
+    <section class="panel incidents"><h2>Incidents <span id="incident-count"></span></h2><div id="incidents" class="scroll"><p class="empty">Loading incidents…</p></div></section>
+    <section class="panel defenses"><h2>Active defenses</h2><div id="defenses" class="scroll"></div></section>
+    <section class="panel actions"><h2>Investigator activity <span id="action-count"></span></h2><div id="actions" class="scroll"></div></section>
+    <section class="panel notifications"><h2>Email notifications <span id="mail-count"></span></h2><div id="notifications" class="scroll"></div><p class="hint">Accepted means Resend accepted the request, not confirmed inbox delivery.</p></section>
+    <section class="panel outcomes"><h2>Recent request outcomes</h2><div id="outcomes" class="scroll"></div></section>
   </div>
 </main>
-
-<script>
-const $ = id => document.getElementById(id);
-const esc = s => (s ?? "").toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const clip = (s,n) => { s=(s??"").toString(); return s.length>n ? s.slice(0,n)+"…" : s; };
-
-/* inline icons (currentColor) */
-const IC_BAN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>';
-const IC_RULE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/></svg>';
-const IC_ARROW= '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/></svg>';
-
-/* ---------- connection: SSE with polling fallback ---------- */
-function setConn(ok){ const c=$("conn"); c.className="conn "+(ok?"ok":"off"); c.textContent=ok?"live":"disconnected"; }
-let pollTimer=null;
-function startPolling(){
-  if(pollTimer) return;
-  const f=async()=>{ try{ apply(await (await fetch("/__state")).json()); setConn(true); }catch(_){ setConn(false); } };
-  f(); pollTimer=setInterval(f,1200);
-}
-function connectSSE(){
-  let es;
-  try { es=new EventSource("/__stream"); } catch(_){ return startPolling(); }
-  es.onmessage = e => { try{ apply(JSON.parse(e.data)); setConn(true); }catch(_){} };
-  es.onerror = () => { setConn(false); try{es.close();}catch(_){}; startPolling(); };
-}
-window.EventSource ? connectSSE() : startPolling();
-
-/* ---------- incremental list rendering (animate new items at top) ---------- */
-function syncList(container, items, keyFn, renderFn, cap=160){
-  const seen = container._seen || (container._seen = new Set());
-  // items are newest-first; insert new ones oldest-first so newest ends on top
-  for(let i=items.length-1;i>=0;i--){
-    const k = keyFn(items[i]);
-    if(seen.has(k)) continue;
-    seen.add(k);
-    const node = document.createElement("div");
-    node.innerHTML = renderFn(items[i]);
-    const el = node.firstElementChild; if(!el) continue;
-    el.classList.add("enter");
-    container.insertBefore(el, container.firstChild);
-  }
-  while(container.children.length>cap) container.removeChild(container.lastChild);
-}
-
-/* ---------- render ---------- */
-let prevStats={};
-function setStat(id,val){
-  const el=$(id); const s=String(val);
-  if(el.textContent!==s){ el.textContent=s; if(prevStats[id]!==undefined){ el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  prevStats[id]=s;
-}
-
-function responseTime(d){
-  if(!d.incidents||!d.incidents.length) return "-";
-  const inc=d.incidents[0]; const t=Date.parse(inc.ts); if(isNaN(t)) return "-";
-  let first=null;
-  for(const e of (d.events||[])){ if(e.ip===inc.source_ip){ const et=Date.parse(e.ts); if(!isNaN(et)&&(first===null||et<first)) first=et; } }
-  if(first===null) return "-";
-  const sec=Math.max(0,Math.round((t-first)/1000));
-  return sec<1 ? "<1s" : sec+"s";
-}
-
-function renderStats(d){
-  const ev=d.events||[];
-  setStat("s-req", d.events_total ?? ev.length);
-  setStat("s-blk", ev.filter(e=>e.blocked).length);
-  setStat("s-atk", (d.incidents||[]).length);
-  setStat("s-ban", (d.denylist||[]).length);
-  setStat("s-divert", (d.honeypot||[]).length);
-  setStat("s-mttr", responseTime(d));
-}
-
-let prevFunnel=[0,0,0,0,0];
-function renderFunnel(d){
-  const tri=(d.actions||[]).filter(a=>a.kind==="triage");
-  const acts=(d.actions||[]).filter(a=>a.kind==="action");
-  const n=[ d.events_total ?? (d.events||[]).length,
-            tri.length,
-            tri.filter(t=>t.jev && t.jev.malicious).length,
-            tri.filter(t=>t.escalated).length,
-            acts.length ];
-  const base=Math.max(n[0],1);
-  for(let i=0;i<5;i++){
-    $("fn"+i).textContent=n[i];
-    $("fb"+i).style.width=Math.max(n[i]?4:0, Math.round(100*n[i]/base))+"%";
-    if(n[i]!==prevFunnel[i]){ const el=$("fn"+i); el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); }
-  }
-  prevFunnel=n;
-}
-
-function renderFeed(d){
-  const ev=(d.events||[]);
-  $("feed-n").textContent = ev.length ? ev.length+" shown" : "";
-  if(!ev.length){ $("feed").innerHTML='<div class="empty">no traffic yet</div>'; $("feed")._seen=new Set(); return; }
-  const key=e=>[e.ts,e.ip,e.method,e.path,e.query,e.status,e.blocked].join("|");
-  syncList($("feed"), ev, key, e=>{
-    const cls=e.blocked?"blocked":(e.matched?"attack":"");
-    const q=e.query?("?"+esc(clip(e.query,90))):"";
-    return `<div class="row ${cls}"><span class="tag b${e.status}">${esc(e.status)}</span>`
-         + `<span class="ip">${esc(e.ip)}</span>`
-         + `<span class="pathtxt"><span class="meth">${esc(e.method)}</span> ${esc(e.path)}${q}</span></div>`;
-  });
-}
-
-function renderReplay(d){
-  const ev=(d.events||[]); const map={};
-  for(const e of ev){ // newest-first
-    const sig=`${e.method} ${e.path}${e.query?("?"+e.query):""}`;
-    const m=map[sig]||(map[sig]={leak:null,block:null});
-    if(e.blocked){ if(!m.block) m.block=e; }
-    else if(Number(e.status)<400){ m.leak=e; } // ends as oldest success
-  }
-  const pairs=Object.entries(map).filter(([,m])=>m.leak&&m.block
-                 && Date.parse(m.block.ts)>=Date.parse(m.leak.ts))
-                 .sort((a,b)=>Date.parse(b[1].block.ts)-Date.parse(a[1].block.ts)).slice(0,3);
-  if(!pairs.length){ $("replay").innerHTML='<div class="empty">waiting for an exploit to be blocked. run an attack, then run it again.</div>'; return; }
-  const tm=s=>{const d2=new Date(Date.parse(s)); return isNaN(d2)?"":d2.toISOString().slice(11,19);};
-  $("replay").innerHTML=pairs.map(([sig,m])=>{
-    const dt=Math.max(0,Math.round((Date.parse(m.block.ts)-Date.parse(m.leak.ts))/1000));
-    return `<div class="rcard"><div class="pl">${esc(clip(sig,150))}</div><div class="ba">`
-      +`<div class="pill leak">${esc(m.leak.status)} LEAKED<small>${tm(m.leak.ts)}</small></div>`
-      +`<div class="arrow">${IC_ARROW}</div>`
-      +`<div class="pill block">${esc(m.block.status)} BLOCKED<small>${tm(m.block.ts)} &middot; +${dt}s</small></div>`
-      +`</div></div>`;
-  }).join("");
-}
-
-function renderIncidents(d){
-  const inc=(d.incidents||[]);
-  $("inc-n").textContent=inc.length||"";
-  if(!inc.length){ $("inc").innerHTML='<div class="empty">no incidents, all clear</div>'; $("inc")._seen=new Set(); return; }
-  const key=i=>[i.ts,i.source_ip,i.attack_type,i.summary].join("|");
-  syncList($("inc"), inc, key, i=>
-    `<div class="inc"><div class="t"><span class="sev ${esc(i.severity)}">${esc(i.severity)}</span>`
-    +`${esc(i.attack_type)} <span class="ip">${esc(i.source_ip)}</span></div>`
-    +`<div class="meta">${esc(i.ts)} &middot; ${esc(i.summary)}</div>`
-    +`<div class="ev">${esc(clip(i.evidence,220))}</div></div>`, 40);
-}
-
-function renderDefenses(d){
-  const bans=(d.denylist||[]), diverts=(d.honeypot||[]);
-  $("def-n").textContent=(bans.length+diverts.length+(d.enforced_security?1:0))||"";
-  const html=bans.map(b=>`<div class="item"><span class="iico ban-ic">${IC_BAN}</span><span class="ip">${esc(b.ip)}</span> <span class="why">${esc(b.reason)}</span></div>`).join("")
-    + diverts.map(b=>`<div class="item"><span>DIVERT</span><span class="ip">${esc(b.ip)}</span><span class="why">${esc(b.reason)}</span></div>`).join("")
-    + (d.enforced_security?`<div class="item">App security: ${esc(d.enforced_security)}</div>`:"");
-  $("def").innerHTML = html || '<div class="empty">no defenses deployed</div>';
-}
-
-function renderActions(d){
-  const a=(d.actions||[]);
-  $("act-n").textContent=a.length||"";
-  if(!a.length){ $("acts").innerHTML='<div class="empty">no agent activity yet</div>'; $("acts")._seen=new Set(); return; }
-  const key=x=>[x.ts,x.kind,x.tool||"",x.ip||"",x.path||"",JSON.stringify(x.input||x.jev||"")].join("|");
-  syncList($("acts"), a, key, x=>{
-    if(x.kind==="triage"){
-      const j=x.jev;
-      const sc = j && j.malicious_score!=null ? (typeof j.malicious_score==="number"? j.malicious_score.toFixed(2): j.malicious_score) : "";
-      const verdict = j ? (j.malicious?`<span style="color:var(--red)">malicious ${esc(sc)}</span> ${esc(j.attack_type||"")}`:`<span class="ok">benign</span>`)
-                        : `<span class="adim">no Jev verdict</span>`;
-      const arrowMap = {autoblock:["var(--red)","auto-block"], claude:["var(--amber)","Claude"],
-                        benign:["var(--faint)","dropped"], jev_error:["var(--amber)","Claude (jev err)"],
-                        no_engine:["var(--faint)","no engine"]};
-      const [ac,al] = arrowMap[x.outcome] || (x.escalated?["var(--amber)","acted"]:["var(--faint)","ignored"]);
-      const arrow = `<span style="color:${ac}">→ ${al}</span>`;
-      return `<div class="act"><span class="abadge ab-jev">JEV</span><span class="atxt"><span class="adim">${esc(x.ip)}</span> ${esc(clip(x.path||"",28))} ${verdict} ${arrow}</span></div>`;
-    }
-    const map={blacklist_ip:["ab-ban","BAN"],raise_alert:["ab-alert","ALERT"]};
-    const [cls,lbl]=map[x.tool]||["ab-alert",(x.tool||"TOOL").toUpperCase()];
-    const i=x.input||{};
-    let detail="";
-    if(x.tool==="blacklist_ip") detail=`${esc(i.ip||"")} <span class="adim">${esc(clip(i.reason||"",40))}</span>`;
-    else if(x.tool==="raise_alert") detail=`<span class="sev ${esc(i.severity||"")}">${esc(i.severity||"")}</span> ${esc(i.attack_type||"")} <span class="adim">${esc(i.source_ip||"")}</span>`;
-    else detail=esc(clip(JSON.stringify(i),60));
-    return `<div class="act"><span class="abadge ${cls}">${esc(lbl)}</span><span class="atxt">${detail}</span></div>`;
-  });
-}
-
-/* ---------- console (tabbed, bottom-anchored) ---------- */
-let consoleSrc="blue", lastLogs={};
-document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
-  t.classList.add("on"); consoleSrc=t.dataset.src; renderConsole(lastLogs);
-}));
-function renderConsole(logs){
-  lastLogs=logs||{};
-  const el=$("console");
-  const lines=(lastLogs[consoleSrc]||[]);
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  el.textContent = lines.length ? lines.join("\n") : "(no output on this stream yet)";
-  if(atBottom) el.scrollTop = el.scrollHeight;
-}
-
-/* ---------- apply snapshot ---------- */
-function apply(d){
-  if(!d) return;
-  renderStats(d); renderFunnel(d); renderFeed(d); renderReplay(d);
-  renderIncidents(d); renderDefenses(d); renderActions(d); renderConsole(d.logs);
-}
-
-/* clock */
-setInterval(()=>{ $("clock").textContent=new Date().toISOString().replace("T"," ").slice(0,19)+" UTC"; },1000);
-</script>
+<dialog id="incident-detail" aria-labelledby="detail-title">
+  <div class="dialog-header"><h2 id="detail-title">Incident details</h2><button id="close-detail" type="button">Close</button></div>
+  <div id="detail-body"></div>
+</dialog>
 </body>
 </html>

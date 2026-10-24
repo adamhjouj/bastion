@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# Wait for DVWA, initialize the store (idempotent), then serve.
-# Does NOT reset defenses, events or logs between restarts.
 set -euo pipefail
+export DVWA_URL="${DVWA_URL:-http://dvwa:80}"
 
-DVWA_URL="${DVWA_URL:-http://dvwa:80}"
+echo "[proxy] waiting for DVWA ..."
+python - <<'PY'
+import os
+import time
+import urllib.request
 
-echo "[proxy] waiting for DVWA at ${DVWA_URL} ..."
-for i in $(seq 1 60); do
-    curl -sf "${DVWA_URL}/login.php" -o /dev/null && break
-    [ "$i" = 60 ] && { echo "[proxy] DVWA not ready after 60s"; exit 1; }
-    sleep 2
-done
+for attempt in range(60):
+    try:
+        urllib.request.urlopen(os.environ['DVWA_URL'] + '/login.php', timeout=3).close()
+        break
+    except Exception:
+        if attempt == 59:
+            raise SystemExit('[proxy] DVWA readiness timed out')
+        time.sleep(2)
+PY
 
-echo "[proxy] verifying DVWA login ..."
 python bootstrap_dvwa.py "${DVWA_URL}" || {
-    echo "[proxy] WARNING: DVWA login failed; DB may need explicit initialization"
-    echo "[proxy] Run: docker compose exec dvwa python bootstrap_dvwa.py \$DVWA_URL --reset-confirm RESET-DVWA"
+    echo "[proxy] DVWA login unavailable; initialize the lab DB explicitly if needed"
+    echo "[proxy] docker compose exec proxy python bootstrap_dvwa.py http://dvwa:80 --reset-confirm RESET-DVWA"
 }
 
-mkdir -p /app/data/logs
-echo "[proxy] starting reverse proxy on :8080 (mode: ${BASTION_MODE:-observe})"
-exec uvicorn proxy:app --host 0.0.0.0 --port 8080 --log-level info
+exec uvicorn proxy:app --host 0.0.0.0 --port 8080 --no-proxy-headers --log-level info

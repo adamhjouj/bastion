@@ -97,6 +97,26 @@ Set `BASTION_MODE` to choose when classification happens and who makes enforceme
 
 Asynchronous modes cannot stop the initial request from reaching the application. Inline classification adds provider latency; `INLINE_FAILURE=reject` returns a service-unavailable response when classification fails, while `allow` forwards the request. The default is `reject`.
 
+## Dashboard and logs
+
+The dashboard reads the versioned management API under `/__api/v1`. Counters cover retained history rather than the visible feed; incident details link contributing requests, action outcomes, and email acceptance/failure records. Connection status is separate from worker health. Updates use SSE with reconnection and polling recovery.
+
+The console captures real container stdout and stderr for the proxy, investigator, DVWA, honeypot, actuator, mail worker, and optional red agent. Collection runs inside the actuator using Compose project/service labels; neither the browser nor proxy needs Docker access. Select a source, pause its display, or disable follow to inspect history. Missing, stopped, or disconnected sources are shown explicitly.
+
+Each source retains `LOG_RETENTION_LINES` entries in SQLite. Lines are bounded, common credential patterns are redacted, and reconnects use timestamp replay with duplicate suppression. This is operational log history, not a forensic archive: runtime rotation, clock changes, and bounded retention can leave gaps. File-only application logs must be routed to stdout/stderr by that service.
+
+Run the optional containerized red agent to capture its console output:
+
+```sh
+docker compose --profile red-team up red
+```
+
+This runs the SQL-injection lab objective and requires an LLM key. Host-run red-agent processes are not Docker log sources. Rebuild and recreate services after changing collector or frontend code:
+
+```sh
+docker compose up --build -d
+```
+
 ## Response controls
 
 The investigator calls named, schema-validated tools. It can inspect recent requests and defenses, ban or unban sources, divert attackers, and raise incidents. Infrastructure operations go through an authenticated actuator service; the Docker socket is mounted only into that service.
@@ -133,7 +153,25 @@ uv pip install -r requirements.txt pytest
 .venv/bin/python -m pytest -q
 ```
 
-Tests cover proxy enforcement, classification failures, tool dispatch, persistent state, redaction, authentication, and notification retries. Network interactions use mock transports; these tests do not establish live-model detection quality or production readiness.
+Frontend logic and browser integration tests:
+
+```sh
+npm ci
+npm test
+npx playwright install chromium
+BASTION_PYTHON=.venv/bin/python npm run test:e2e
+```
+
+Optional Docker tests create isolated fixture containers and remove them afterward:
+
+```sh
+docker pull busybox:1.37
+RUN_DOCKER_TESTS=1 .venv/bin/python -m pytest -q test_docker_logs.py
+docker compose build proxy actuator
+RUN_DOCKER_APP_TESTS=1 .venv/bin/python -m pytest -q test_docker_dashboard.py
+```
+
+Tests cover proxy enforcement, classification failures, tool dispatch, persistent state, redaction, authentication, notification retries, live log replay, and browser updates. The default suite uses mock transports; Docker tests are opt-in. These checks do not establish live-model detection quality or production readiness.
 
 The optional red agent supports SQL-injection and command-injection objectives against the local DVWA lab. Run it with the appropriate provider credentials exported:
 

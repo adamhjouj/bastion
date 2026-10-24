@@ -10,10 +10,12 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 import rate_limit
 import store
 from classifier import AsyncClassifier
+from dashboard_api import router as dashboard_router
 from privacy import request_view
 from security import authorize, source_ip as resolve_source
 from settings import Settings
@@ -47,15 +49,20 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
     async def lifespan(app):
         policy.validate()
         store.initialize()
-        # Lifespan: prefer shared instances created above; replace when lifespan fires.
-        app.state.http = httpx.AsyncClient(timeout=15, follow_redirects=False, transport=upstream_transport,
-                                            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
-        app.state.classifier = AsyncClassifier(policy, transport=classifier_transport)
+        get_http()
+        get_classifier()
         store.set_health("proxy", {"mode": policy.mode, "ready": True,
                                    "warning": "no payload protection" if policy.mode == "observe" else None})
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(10)
+                await asyncio.to_thread(store.touch_health, "proxy")
+        pulse = asyncio.create_task(heartbeat())
         try:
             yield
         finally:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
             await app.state.http.aclose()
             await app.state.classifier.close()
             store.set_health("proxy", {"mode": policy.mode, "ready": False})
@@ -63,12 +70,16 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = policy
 
-    # Eagerly initialise shared state so the app works under ASGITransport in tests
-    # where lifespan may not fire. Idempotent: initialize() is a no-op after first call.
-    store.initialize()
-    http_client = httpx.AsyncClient(timeout=15, follow_redirects=False, transport=upstream_transport,
-                                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
-    clf = AsyncClassifier(policy, transport=classifier_transport)
+    def get_http():
+        if getattr(app.state, "http", None) is None or app.state.http.is_closed:
+            app.state.http = httpx.AsyncClient(timeout=15, follow_redirects=False, transport=upstream_transport,
+                                              limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
+        return app.state.http
+
+    def get_classifier():
+        if getattr(app.state, "classifier", None) is None or app.state.classifier.client.is_closed:
+            app.state.classifier = AsyncClassifier(policy, transport=classifier_transport)
+        return app.state.classifier
 
     @app.middleware("http")
     async def management_boundary(request, call_next):
@@ -82,7 +93,7 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
         response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/__"):
             response.headers["Cache-Control"] = "no-store"
-            response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
         return response
 
     @app.get("/__health")
@@ -111,8 +122,13 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
                 await asyncio.sleep(1)
         return StreamingResponse(generate(), media_type="text/event-stream")
 
+    app.include_router(dashboard_router)
+    app.mount("/__assets", StaticFiles(directory=BASE / "static"), name="dashboard-assets")
+
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
     async def forward(path: str, request: Request):
+        if path.startswith("__"):
+            raise HTTPException(404, "management route not found")
         ip = source_ip(request)
         body = bytearray()
         async for chunk in request.stream():
@@ -149,7 +165,7 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
                 return result(JSONResponse({"error": "capacity limit"}, status_code=429,
                                           headers={"Retry-After": str(rate_limit.retry_after())}), "rate_limit", True)
             if policy.mode == "inline":
-                clf_instance = getattr(app.state, "classifier", clf)
+                clf_instance = get_classifier()
                 verdict = await clf_instance.classify(event)
                 event["verdict"] = verdict
                 if verdict.get("malicious") is True:
@@ -167,7 +183,7 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
         headers.append(("cookie", cookie))  # explicit even if empty: no shared client-cookie leakage
         try:
             url = httpx.URL(target).copy_with(path="/" + path, query=raw_query)
-            http = getattr(app.state, "http", http_client)
+            http = get_http()
             async with http.stream(request.method, url, headers=headers, content=bytes(body)) as up:
                 content = bytearray()
                 async for chunk in up.aiter_bytes():

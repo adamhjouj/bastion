@@ -3,3 +3,6 @@ data/
 .venv/
 __pycache__/
 .pull.log
+node_modules/
+playwright-report/
+test-results/

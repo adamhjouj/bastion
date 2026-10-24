@@ -51,11 +51,13 @@ def main(argv=None):
                 print("Accepted by the mail provider. Check your inbox/spam folder and the provider's email log; inbox delivery is not yet confirmed.")
                 return 0
             return 1
+        print("Mail worker started; waiting for queued Resend notifications", flush=True)
         stop = threading.Event()
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         while not stop.is_set():
             try:
+                store.set_health("mail-worker", {"ready": True})
                 result = store.deliver_mail(send_email)
                 if result:
                     print(json.dumps(result), flush=True)
@@ -63,6 +65,8 @@ def main(argv=None):
                 # Unexpected errors must not log request objects or credentials.
                 store.set_health("mail", {"available": False, "error": "mail worker failure"})
             stop.wait(1)
+        store.set_health("mail-worker", {"ready": False})
+        print("Mail worker stopped", flush=True)
         return 0
     except MailError as exc:
         print(f"Email configuration/delivery error: {exc}")
