@@ -39,23 +39,21 @@ POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
 USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
 USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
-# Jev's verdict drives the WAF directly (fast reflex, no Claude needed).
-JEV_AUTOBLOCK = os.environ.get("JEV_AUTOBLOCK", "1") == "1"
-# Two-tier band (the project's thesis: agent reasons, not a bare score->ban):
-#   score >= AUTOBLOCK_HIGH  -> unambiguous attack, instant reflex block (the live 403)
-#   THRESHOLD <= score < HIGH -> ambiguous, escalate to the agent to INVESTIGATE & decide
-# A pure threshold->ban is exactly a commodity WAF; the ambiguous band is where the
-# agent earns its keep (and clears false positives like a legit ?ip=127.0.0.1 ping).
+# DESIGN: Jev FLAGS, the agent DECIDES. Jev has NO authority to block — a bare score->ban
+# is just a worse Cloudflare and steals the agent's whole reason to exist. Default: every
+# flagged request is handed to the agent, which owns ALL enforcement (ban / WAF rule /
+# divert / patch / incident). JEV_AUTOBLOCK is OFF by default; it is only insurance:
+#   - agent present + JEV_AUTOBLOCK=1: on a very-high-confidence flag Jev may take ONE
+#     reversible holding action — a silent DIVERT to the decoy (never a ban) — while the
+#     agent is still handed the case. Buys latency without Jev deciding anything.
+#   - no agent available (no LLM key): Jev contains on its own (TTL ban + canned rule +
+#     email). The sole case Jev enforces, because nothing else can.
+JEV_AUTOBLOCK = os.environ.get("JEV_AUTOBLOCK", "0") == "1"
+# Confidence at/above which the opt-in reflex may fire its reversible divert.
 AUTOBLOCK_HIGH = float(os.environ.get("AUTOBLOCK_HIGH", "0.9"))
-# Reflex bans are provisional: the IP ban is cheap-to-reverse (one attacker, not a
-# class-wide rule), so it carries a short TTL and auto-lifts. If the agent confirms
-# the attack it re-bans durably; if it was a false flag, the ban expires on its own.
+# No-agent fallback bans are provisional: a short-TTL IP ban that auto-lifts (cheap to be
+# wrong about — one IP, not a class-wide rule).
 AUTOBLOCK_TTL_MIN = int(os.environ.get("AUTOBLOCK_TTL_MIN", "15"))
-# What the high-confidence reflex DOES: "ban" (default) = contain via the TTL IP ban;
-# "divert" = deception-first — also route the IP to the honeypot decoy from request #1
-# (no 403 tip-off, instant TTP harvest), with the TTL ban kept as a backstop. 'divert'
-# needs honeypot_tools present + the proxy's HONEYPOT_URL set, else it degrades to 'ban'.
-AUTOBLOCK_MODE = os.environ.get("AUTOBLOCK_MODE", "ban")
 # The LLM agent (system-2) is optional enrichment; on if an Anthropic OR DeepSeek
 # key is present (see llm.py for provider selection).
 USE_AGENT = llm.provider() is not None
@@ -85,6 +83,9 @@ SYSTEM = (
     "receive recent HTTP requests captured at a reverse proxy in front of the app. "
     "Decide whether any request is a real attack. Known classes: SQL injection, "
     "command injection, path traversal, XSS.\n\n"
+    "You are the SOLE decision-maker. Jev (system-1) only FLAGS what deserves a look — "
+    "it has NO authority to block. Every enforcement action (blacklist, WAF rule, "
+    "divert, patch, incident) is yours to take or withhold.\n\n"
     "The Jev system-1 classifier already flagged these as SUSPICIOUS, but it is "
     "twitchy and advisory — a flag is a reason to LOOK, not proof of an attack. "
     "Before acting on any request you are not certain about, call inspect_target "
@@ -103,11 +104,11 @@ SYSTEM = (
     "4. if patch_vuln is available and containment alone is insufficient, call it "
     "to raise the app's security posture (real eradication beyond the WAF). Note "
     "it hardens the whole app, so reserve it for a confirmed, serious exploit.\n\n"
-    "Some source IPs may already carry a PROVISIONAL short-TTL ban from the system-1 "
-    "reflex (an 'expires' timestamp in the denylist). That ban is reversible and auto-"
-    "lifts. If you CONFIRM the attack, call blacklist_ip again (no expiry) to make it "
-    "durable and add the tight WAF rule. If investigation shows it was benign, do NOT "
-    "re-ban or add a rule — say 'no threat' and let the provisional ban expire on its own.\n\n"
+    "A very-high-confidence flag may already have been DIVERTED to the decoy by the "
+    "reflex as a reversible holding action (the IP appears in the honeypot list, NOT "
+    "banned). Confirm it, then decide the durable response: keep diverting to harvest, "
+    "and/or blacklist_ip + add the tight WAF rule. If it was a false flag, call "
+    "undivert(ip). The reflex never bans — every ban is your decision.\n\n"
     "Soft-containment alternative: if divert_to_honeypot is available and you want to "
     "harvest the attacker's techniques or buy a remediation window rather than ban "
     "immediately, call divert_to_honeypot(ip) to silently route them to a decoy (a hard "
@@ -316,33 +317,36 @@ def record_triage(e, escalated, outcome):
     })
 
 
-def autoblock(event, verdict, defer_rule=False):
-    """System-1 reflex containment — no LLM. Bans the source IP with a short TTL
-    (reversible; scoped to one attacker). The durable, class-wide WAF rule is the
-    high-blast-radius action, so it is DEFERRED to the agent (defer_rule=True). Only
-    when there is no agent to defer to does the reflex also add the canned rule + email
-    and own the full incident itself."""
+def reflex_divert(event, verdict):
+    """Opt-in insurance (JEV_AUTOBLOCK=1), agent present: on a very-high-confidence flag,
+    silently DIVERT the IP to the decoy as a REVERSIBLE holding action while the agent is
+    handed the case. No ban, no rule, no email — Jev makes NO enforcement decision here;
+    the agent owns ban/patch/divert/incident. No-op if no honeypot tool is wired."""
+    if "divert_to_honeypot" not in DISPATCH:
+        return
+    ip = event["ip"]
+    atk = verdict["attack_type"]
+    score = verdict.get("malicious_score") or 0.0
+    dreason = f"reflex-divert: Jev {atk} ({score:.2f}) pending agent triage"
+    rd = DISPATCH["divert_to_honeypot"](ip=ip, reason=dreason)
+    record_action("divert_to_honeypot", {"ip": ip, "reason": dreason}, rd)
+    print(f"[blue] REFLEX-DIVERT {ip} ({atk}, {score:.2f}) -> decoy (reversible); "
+          f"agent decides the response", flush=True)
+
+
+def autoblock(event, verdict):
+    """NO-AGENT FALLBACK ONLY: with no system-2 agent available, Jev contains on its own —
+    the sole case Jev enforces, because nothing else can. Provisional TTL IP ban + canned
+    virtual-patch rule + email. When an agent is present it owns all enforcement and this
+    is never called."""
     ip = event["ip"]
     atk = verdict["attack_type"]
     score = verdict.get("malicious_score") or 0.0
     evidence = f"{event.get('method')} {event.get('path')}?{event.get('query', '')} {event.get('body', '')}".strip()
     expires = store.now_plus(AUTOBLOCK_TTL_MIN * 60)
-    reason = f"Jev-flagged {atk} ({score:.2f}); provisional {AUTOBLOCK_TTL_MIN}m ban"
+    reason = f"Jev-only fallback {atk} ({score:.2f}); provisional {AUTOBLOCK_TTL_MIN}m ban"
     r1 = do_blacklist_ip(ip, reason, expires=expires)
     record_action("blacklist_ip", {"ip": ip, "reason": reason, "expires": expires}, r1)
-    # Deception-first: also divert to the decoy so the attacker is fooled from request #1.
-    # Honeypot precedence (in the proxy) routes them to the decoy; the TTL ban is the
-    # backstop that applies the instant the divert is lifted. Degrades to plain ban if the
-    # honeypot tool isn't registered.
-    if AUTOBLOCK_MODE == "divert" and "divert_to_honeypot" in DISPATCH:
-        dreason = f"auto-divert: Jev {atk} ({score:.2f})"
-        rd = DISPATCH["divert_to_honeypot"](ip=ip, reason=dreason)
-        record_action("divert_to_honeypot", {"ip": ip, "reason": dreason}, rd)
-    if defer_rule:
-        print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> provisional "
-              f"{AUTOBLOCK_TTL_MIN}m IP ban; durable WAF rule deferred to agent", flush=True)
-        return
-    # No agent available: the reflex is the whole responder (contain + canned patch + alert).
     actions = [r1]
     rule = CANNED_WAF.get(atk)
     if rule:
@@ -461,21 +465,17 @@ def main():
                 record_triage(e, escalated=False, outcome="benign")
                 continue
             score = v.get("malicious_score") or 0.0
-            print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
+            print(f"[blue] jev FLAG: {e['ip']} {e['method']} {e['path']} -> "
                   f"{v['attack_type']} ({score:.2f})", flush=True)
-            if JEV_AUTOBLOCK and score >= AUTOBLOCK_HIGH:
-                # unambiguous -> instant reversible IP containment (live 403) now...
-                autoblock(e, v, defer_rule=USE_AGENT)
-                if USE_AGENT:
-                    to_claude.append(e)            # ...agent owns durable rule + incident
-                    record_triage(e, escalated=True, outcome="autoblock+claude")
-                else:
-                    record_triage(e, escalated=True, outcome="autoblock")
-            elif USE_AGENT:
-                to_claude.append(e)                # ambiguous band -> agent investigates
+            if USE_AGENT:
+                # Jev FLAGS -> the agent DECIDES (owns ban/rule/divert/patch/incident).
+                # Optional reversible holding action only; Jev enforces nothing itself.
+                if JEV_AUTOBLOCK and score >= AUTOBLOCK_HIGH:
+                    reflex_divert(e, v)
+                to_claude.append(e)
                 record_triage(e, escalated=True, outcome="claude")
             elif JEV_AUTOBLOCK:
-                autoblock(e, v, defer_rule=False)  # no agent -> fail safe: full reflex responder
+                autoblock(e, v)                    # no agent -> Jev-only fallback containment
                 record_triage(e, escalated=True, outcome="autoblock_fallback")
             else:
                 record_triage(e, escalated=False, outcome="no_engine")
