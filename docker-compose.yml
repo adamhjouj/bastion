@@ -17,10 +17,10 @@ services:
     image: vulnerables/web-dvwa
     logging: *runtime-logging
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost/login.php"]
+      test: ["CMD", "bash", "-c", "php -r 'exit(file_get_contents(\"http://127.0.0.1/login.php\")===false?1:0);'"]
       interval: 10s
       timeout: 5s
-      retries: 9
+      retries: 12
     restart: unless-stopped
 
   honeypot:

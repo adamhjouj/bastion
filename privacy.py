@@ -44,7 +44,7 @@ def request_view(method, path, query, body, content_type=""):
             body_view, body_text = None, "[unparseable JSON omitted]"
     elif not body:
         body_view, body_text = None, ""
-    elif any(b > 127 for b in (body.encode("latin1") if isinstance(body, str) else body)):
+    elif any(b > 127 for b in (body.encode("latin1", "replace") if isinstance(body, str) else body)):
         body_view, body_text = None, "[binary body omitted]"
     else:
         # Unstructured text or multipart bodies are not sent to external providers by default.

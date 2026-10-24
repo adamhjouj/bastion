@@ -22,9 +22,13 @@ _semaphore = asyncio.Semaphore(2)
 def status():
     result = []
     for target in sorted(actuator.ALLOWED_TARGETS):
-        cid = actuator._resolve(target)
-        rc, out, _ = actuator._docker("inspect", "--format", "{{.State.Status}}", cid)
-        result.append({"service": target, "state": out.strip() if rc == 0 else "unknown"})
+        try:
+            cid = actuator._resolve(target)
+            rc, out, _ = actuator._docker("inspect", "--format", "{{.State.Status}}", cid)
+            state = out.strip() if rc == 0 else "unknown"
+        except actuator.Rejected as exc:
+            state = f"unavailable: {exc}"
+        result.append({"service": target, "state": state})
     return json.dumps(result)
 
 

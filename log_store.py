@@ -41,7 +41,7 @@ def sources():
         item = rows.get(source, {"source": source, "status": "unavailable", "message": "Collector has not reported this source", "updated": None, "container_id": None})
         if item["updated"]:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(item["updated"].replace("Z", "+00:00"))).total_seconds()
-            if age > 30:
+            if age > 60:  # 10s heartbeat; allow 6x headroom for slow stores and GC pauses
                 item.update(status="stale", message="Log collector heartbeat is stale")
         # No arbitrary container selector is exposed to the browser.
         result.append(item)

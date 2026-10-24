@@ -103,7 +103,7 @@ def _latest_containment(db, incidents):
 
 def snapshot(mode=None):
     with store.connection() as db:
-        db.execute("BEGIN")  # consistent read view across counters, defenses and pages
+        # WAL mode readers see a consistent snapshot without an explicit transaction.
         counts = {r["kind"]: r["n"] for r in db.execute("SELECT kind,COUNT(*) n FROM records GROUP BY kind")}
         queue = {r["status"]: r["n"] for r in db.execute("SELECT status,COUNT(*) n FROM records WHERE kind='events' GROUP BY status")}
         mail = {r["status"]: r["n"] for r in db.execute("SELECT status,COUNT(*) n FROM outbox GROUP BY status")}

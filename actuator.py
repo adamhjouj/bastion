@@ -402,18 +402,34 @@ REGISTER = [{"name": t["name"], "schema": t,
 
 # ---- self-test (no real containers touched) --------------------------------
 
+# Baseline identity is now (cid, pid, start_time). Each field needs a distinct
+# mock response for the ps and /proc/pid/stat reads.
+_FAKE_START = "12345678"
+
+
 def _selftest():
     global _RUNNER
-    fake = {"pids": [100, 101, 102]}  # baseline set
+    fake = {"pids": [100, 101, 102]}
 
     def runner(args):
         a = " ".join(args)
         if args[0] == "ps":
-            return (0, "fakecid\n", "") if "service=dvwa" in a or "service=proxy" in a else (0, "", "")
-        if args[0] == "exec" and "ps" in args:  # _pids reads container-ns `ps`
+            # _discover format: {{.ID}} {{.State}}
+            if "--format" in args and "running" not in a and "service=dvwa" in a:
+                return (0, "fakecid running\n", "")
+            # _resolve format: -q
+            if "-q" in args and "service=dvwa" in a:
+                return (0, "fakecid\n", "")
+            if "service=proxy" in a:
+                return (0, "proxycid\n", "")
+            return (0, "", "")
+        if args[0] == "exec" and "ps" in args:
             return (0, "".join(f"{p} proc{p}\n" for p in fake["pids"]), "")
+        if args[0] == "exec" and "cat" in a and "/proc/" in a:
+            # Return a minimal /proc/pid/stat: comm field then space-separated fields
+            return (0, f"1 (proc) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 {_FAKE_START}\n", "")
         if args[0] == "inspect":
-            return (0, "breach-agent_default \n", "")
+            return (0, "bastion_default \n", "")
         if args[0] == "exec" and "ls" in a:
             return (0, "sess_abc\nsess_def\n", "")
         if args[0] == "exec" and "find" in a:
@@ -422,34 +438,36 @@ def _selftest():
             return (0, "$_DVWA[ 'db_user' ] = 'app';\n"
                        "$_DVWA[ 'db_password' ] = 'oldpw';\n", "")
         if args[0] == "exec" and "mysql" in a:
-            # old (possibly stolen) creds must be dead after rotation
             return (1, "", "Access denied") if "--password=oldpw" in args else (0, "1\n", "")
-        if args[0] in ("exec", "pause", "unpause", "network"):  # sed, kill, rm, ...
+        if args[0] in ("exec", "pause", "unpause", "network"):
             return (0, "", "")
         return (0, "", "")
 
     _RUNNER = runner
     _BASELINE.clear()
     capture_baseline()
-    assert _BASELINE["dvwa"] == frozenset({100, 101, 102}), _BASELINE
+    expected = frozenset(("fakecid", p, _FAKE_START) for p in [100, 101, 102])
+    assert _BASELINE["dvwa"] == expected, _BASELINE
 
-    # target boundary: the agent cannot touch the proxy or itself
+    # target boundary
     assert run_tool("quarantine_container", {"target": "proxy"}).startswith("REJECTED")
     assert run_tool("quarantine_container", {"target": "blue"}).startswith("REJECTED")
     assert run_tool("quarantine_container", {"target": "dvwa"}).startswith("dvwa quarantined")
 
-    # kill: attacker spawns pid 1234 AFTER baseline
+    # kill: attacker spawns pid 1234 AFTER baseline; kill requires start_time
     fake["pids"] = [100, 101, 102, 1234]
-    assert run_tool("kill_process", {"target": "dvwa", "pid": 100}).startswith("REJECTED")   # baseline
-    assert run_tool("kill_process", {"target": "dvwa", "pid": 777}).startswith("REJECTED")   # not live
-    assert "notint" and run_tool("kill_process", {"target": "dvwa", "pid": "x"}).startswith("REJECTED")
-    assert run_tool("kill_process", {"target": "dvwa", "pid": 1234}).startswith("killed")    # happy path
+    assert run_tool("kill_process", {"target": "dvwa", "pid": 100, "start_time": _FAKE_START}).startswith("REJECTED")   # in baseline
+    assert run_tool("kill_process", {"target": "dvwa", "pid": 777, "start_time": _FAKE_START}).startswith("REJECTED")   # not running
+    assert run_tool("kill_process", {"target": "dvwa", "pid": "x", "start_time": _FAKE_START}).startswith("REJECTED")   # bad pid
+    assert run_tool("kill_process", {"target": "dvwa", "pid": 1234, "start_time": _FAKE_START}).startswith("killed")
+    # missing required field
+    assert run_tool("kill_process", {"target": "dvwa", "pid": 1234}).startswith("ERROR")
 
     # session id must be charset-clean (no path traversal)
     assert run_tool("kill_session", {"target": "dvwa", "session_id": "../../etc/passwd"}).startswith("REJECTED")
     assert run_tool("kill_session", {"target": "dvwa", "session_id": "abc"}).startswith("invalidated")
 
-    # rotate_secret: happy path confirms + NEVER leaks the secret; boundary holds
+    # rotate_secret: boundary holds; secret never logged
     out = run_tool("rotate_secret", {"target": "dvwa"})
     assert out.startswith("rotated DB password"), out
     assert "oldpw" not in out and "not logged" in out.lower(), out
@@ -459,28 +477,30 @@ def _selftest():
     assert run_tool("bogus", {}).startswith("ERROR")
     assert run_tool("kill_process", {"target": "dvwa", "oops": 1}).startswith("ERROR")
 
-    # register() wires into a plain tools/dispatch pair and routes safely
+    # register() wires safely
     tools, disp = [], {}
     register(tools, disp)
     assert len(tools) == len(CONTROL_TOOLS) and "kill_process" in disp
     assert disp["quarantine_container"](target="proxy").startswith("REJECTED")
 
-    # REGISTER export matches blue_agent's {name,schema,fn} hook shape
+    # REGISTER shape
     assert {r["name"] for r in REGISTER} == set(CONTROL_DISPATCH)
     assert all(set(r) == {"name", "schema", "fn"} for r in REGISTER)
     assert next(r for r in REGISTER if r["name"] == "kill_session")["fn"](
         target="proxy", session_id="x").startswith("REJECTED")
 
-    # rotate_secret must NOT leak the generated secret even if the DB echoes the SQL
+    # rotate_secret must NOT leak the generated secret
     def failrunner(args):
         a = " ".join(args)
-        if args[0] == "ps":
+        if args[0] == "ps" and "-q" in args:
             return (0, "fakecid\n", "")
         if args[0] == "exec" and "find" in a:
             return (0, "/c.php\n", "")
+        if args[0] == "exec" and "cat" in a and "/proc/" in a:
+            return (0, f"1 (proc) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 {_FAKE_START}\n", "")
         if args[0] == "exec" and "cat" in a:
             return (0, "$_DVWA[ 'db_user' ] = 'app';\n$_DVWA[ 'db_password' ] = 'oldpw';\n", "")
-        if args[0] == "exec" and "mysql" in a:   # echo the whole command incl the secret
+        if args[0] == "exec" and "mysql" in a:
             return (1, "", f"ERROR 1064 syntax near \"{a}\"")
         return (0, "", "")
     _RUNNER = failrunner
@@ -494,7 +514,7 @@ def _selftest():
 
 
 if __name__ == "__main__":
-    if "--probe" in sys.argv:  # live read-only peek at the real dvwa container
+    if "--probe" in sys.argv:
         print(list_processes("dvwa"))
         print(list_sessions("dvwa"))
     else:
