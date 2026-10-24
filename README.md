@@ -14,7 +14,7 @@
 <div align="center">
   <h3 align="center">Bastion</h3>
   <p align="center">
-    An autonomous blue-team agent that watches a live web app, detects attacks in real time, and runs damage control on its own
+    An autonomous blue-team agent that lives in your server or containers 24/7, detects attacks in real time, and runs damage control on its own
     <br />
     <a href="https://github.com/adamhjouj/bastion/blob/main/architecture.md"><strong>Explore the docs &raquo;</strong></a>
     <br />
@@ -54,25 +54,25 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Bastion is a 24/7 blue-team agent that sits in front of a live web app, watches its request logs, and runs damage control automatically the moment an attack lands: it blacklists the attacker's IP, virtually patches the vulnerability with a WAF rule, and emails an incident report. It ships with a live dashboard and a scoped autonomous red-team agent that finds the exploit on stage, so you can watch an attack succeed and then watch the same attack get killed seconds later.
+Bastion is a 24/7 blue-team agent that embeds alongside your services (a server, a set of containers, or any app behind it), watches their request logs, and runs damage control automatically the moment an attack lands: it blacklists the attacker's IP, virtually patches the vulnerability with a WAF rule, and emails an incident report. It is built to be an always-on defensive teammate that responds to incidents on its own, so your infrastructure keeps defending itself around the clock without a human in the loop.
 
-The target is [DVWA](https://github.com/digininja/DVWA) (Damn Vulnerable Web Application) running locally at Security=Low, a standard training app for this kind of work. Everything runs on your machine; nothing is ever meant to be exposed publicly.
+It ships with a live dashboard and a self-contained demo: a bundled vulnerable sample app plus a scoped autonomous red-team agent, so you can watch the full detect-and-respond loop end to end on your machine before pointing Bastion at your real services. The demo target is deliberately vulnerable, so keep it local and never expose it publicly.
 
 Key capabilities:
 * **Real-time detection**: a reverse proxy tails every request; a cheap regex pre-filter gates what reaches the model, so Claude only classifies traffic that looks suspicious
 * **Automatic damage control**: on a confirmed attack the blue agent blocks the source IP, adds a virtual-patch WAF rule, and emails a structured incident report, no human in the loop
 * **Proxy as enforcement point**: the same reverse proxy that produces the logs also enforces the denylist and WAF rules, so re-running an attack returns `403` live
-* **Scoped red-team agent**: an autonomous attacker demonstrates SQL injection and command injection against the stage so the defense has something real to react to
+* **Scoped red-team agent**: a bundled autonomous attacker exercises common web attacks (SQL injection, command injection) so you can watch the defense respond end to end
 * **Live dashboard**: a built-in view at `/__dashboard` shows the request feed, incidents, bans, and WAF rules as they happen
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ### How It Works
 
-A reverse proxy sits in front of DVWA and is both the log source and the enforcement point. The blue agent tails its log, a regex pre-filter gates what reaches Claude, then Claude classifies the request and calls tools to block, patch, and alert. Re-running the same attack then returns `403` live.
+A reverse proxy sits in front of the app you want to protect and is both the log source and the enforcement point. The blue agent tails its log, a regex pre-filter gates what reaches Claude, then Claude classifies the request and calls tools to block, patch, and alert. Re-running the same attack then returns `403` live.
 
 ```
-red_agent -> proxy :8080 -> DVWA :80
+red_agent -> proxy :8080 -> your app :80
                  | logs + enforces (denylist + WAF)
                  v
            blue_agent -> Claude -> blacklist / WAF rule / email
@@ -98,7 +98,7 @@ red_agent -> proxy :8080 -> DVWA :80
 ### Prerequisites
 
 * Python 3.10+
-* Docker and Docker Compose (for DVWA and MailHog)
+* Docker and Docker Compose (for the bundled demo target and MailHog)
 * An Anthropic API key
 
 ### Installation
@@ -138,9 +138,10 @@ red_agent -> proxy :8080 -> DVWA :80
    ./run.sh
    ```
 
-   `run.sh` starts DVWA and MailHog, bootstraps DVWA (creates the DB, logs in,
-   sets Security=Low), then starts the reverse proxy on `:8080` and the
-   blue-team agent.
+   `run.sh` brings up the demo stack (the bundled sample target plus a local
+   MailHog mail catcher), bootstraps the target, then starts the reverse proxy
+   on `:8080` and the blue-team agent. To protect your own service instead,
+   point the proxy at it by setting the target URL in `.env`.
 
 5. Open the dashboard and the mailbox
    * Dashboard: [http://localhost:8080/__dashboard](http://localhost:8080/__dashboard)
@@ -154,7 +155,7 @@ red_agent -> proxy :8080 -> DVWA :80
 **Run the red-team agent**
 
 With the stack up, attack it from another terminal. The red agent probes the
-proxied DVWA and finds the exploit live:
+proxied target and finds the exploit live:
 ```sh
 .venv/bin/python red_agent.py sqli     # SQL injection, data exfiltration
 .venv/bin/python red_agent.py cmdi     # command injection, RCE
@@ -180,10 +181,10 @@ curl -s -o /dev/null -w "%{http_code}\n" -H 'X-Forwarded-For: 9.9.9.9' \
 
 **Notes**
 
-DVWA runs at Security=Low, which is the red agent's target. Everything is local;
-never expose DVWA publicly. The `# ponytail` comments in the code flag the
-demo-grade corners and their upgrade paths. See `architecture.md` for the full
-design.
+The bundled demo target is deliberately vulnerable, so keep it local and never
+expose it publicly; point Bastion at your own service by setting the target URL
+in `.env`. The `# ponytail` comments in the code flag the demo-grade corners and
+their upgrade paths. See `architecture.md` for the full design.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
