@@ -316,7 +316,7 @@ def main():
             store.set_health("blue", {"ready": True, "mode": policy.mode})
         except Exception as exc:
             store.set_health("blue", {"ready": False, "error": type(exc).__name__})
-        _STOP.wait(1)
+        _STOP.wait(0.5)  # snappier poll of the durable event queue (demo-stage latency)
     pulse.join(timeout=2)
     store.set_health("blue", {"ready": False})
     _LOG.info("investigator stopped")
