@@ -274,21 +274,38 @@ The one self-test: `.venv/bin/python test_pipeline.py` (needs MailHog on :1025).
 
 ---
 
-## 7. How to run
+## 7. How to run — fully dockerized
+
+The whole stack runs in Docker: DVWA + MailHog + the reverse-proxy/WAF + the blue
+agent. The proxy container waits for DVWA, bootstraps it, then serves. **Only a Jev
+key (`TYPESAFE_API_KEY`) is required** — the blue agent runs in **autoblock** mode
+where Jev's verdict drives the WAF directly, no Anthropic key needed.
 
 ```bash
 cd ~/breach-agent
-cp .env.example .env                 # add ANTHROPIC_API_KEY
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-./run.sh                             # DVWA+MailHog, bootstrap, proxy, blue agent
-# second terminal:
-.venv/bin/python red_agent.py sqli   # then: red_agent.py cmdi
-```
-Dashboard `http://localhost:8080/__dashboard` · MailHog `http://localhost:8025` ·
-browse the app through the proxy at `http://localhost:8080/`.
+cp .env.example .env                 # add TYPESAFE_API_KEY (ANTHROPIC_API_KEY optional)
+./run.sh                             # docker compose up --build -d  (builds + runs everything)
 
-Models: `BLUE_MODEL=claude-sonnet-5` (cheap 24/7 classifier), `RED_MODEL=claude-opus-5`
-(best at finding the exploit). Both overridable in `.env`.
+# attack it (pure-Jev, no Anthropic key):
+curl -H 'X-Forwarded-For: 10.13.37.7' \
+  "http://localhost:8080/vulnerabilities/sqli/?id=1'+OR+'1'='1&Submit=Submit"
+# re-run -> 403 (Jev banned the IP + added a WAF rule). docker compose logs -f blue
+```
+Containers: `dvwa` (internal only), `mailhog` (UI `:8025`), `proxy` (`:8080`,
+reverse-proxy/WAF + dashboard), `blue` (detection loop). `proxy` and `blue` share
+the `bastion-data` volume (`events.jsonl` / `state.json` / `incidents.jsonl`).
+Files: `Dockerfile`, `entrypoint-proxy.sh`, `docker-compose.yml`.
+
+Dashboard `http://localhost:8080/__dashboard` · MailHog `http://localhost:8025`.
+
+**Decision modes** (`blue_agent.py`):
+- `JEV_AUTOBLOCK=1` (default) — Jev-confirmed attack → `autoblock()`: ban IP + add
+  the canned per-type WAF rule + email. Fast reflex, no LLM.
+- `ANTHROPIC_API_KEY` set → Claude (system-2) enrichment: Jev-uncertain / errored
+  cases (and, with autoblock off, all confirmed ones) go to `analyse()` for tight
+  custom WAF regexes + narrated incidents. The autonomous `red_agent.py` also needs it.
+
+Models: `BLUE_MODEL=claude-sonnet-5`, `RED_MODEL=claude-opus-5`. Overridable in `.env`.
 
 ---
 

@@ -15,11 +15,35 @@ import anthropic
 import store
 from classifier import classify_request
 
+try:  # eradication tools live in a sibling module; keep the agent runnable without them
+    from remediation_tools import REGISTER as REMEDIATION_REGISTER
+except Exception:
+    REMEDIATION_REGISTER = None
+
+try:  # control-plane actions (kill_session/egress/quarantine); LLM stays unprivileged — see actuator.py
+    from actuator import REGISTER as CONTROL_REGISTER
+except Exception:
+    CONTROL_REGISTER = None
+
 MODEL = os.environ.get("BLUE_MODEL", "claude-sonnet-5")
 POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
 USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
 USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
+# Jev's verdict drives the WAF directly (fast reflex, no Claude needed).
+JEV_AUTOBLOCK = os.environ.get("JEV_AUTOBLOCK", "1") == "1"
+# Claude (system-2) is optional enrichment; on only if an Anthropic key is present.
+USE_CLAUDE = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+# Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
+CANNED_WAF = {
+    "sql_injection": r"(?i)(union\s+select|\bor\s+1\s*=\s*1|'\s*or\s*'|information_schema|\bsleep\s*\(|--\s|\bupdatexml\b)",
+    # Require a shell-metachar / command context — NOT bare words like "id",
+    # which would match the ubiquitous ?id= parameter and over-block everything.
+    "command_injection": r"(?i)(;\s*\w|&&\s*\w|\|\s*(cat|whoami|id|ls|uname|sh|bash|nc|wget|curl|echo|ping)\b|\$\(|`|/etc/(passwd|shadow)|/bin/)",
+    "xss": r"(?i)(<script|onerror\s*=|onload\s*=|javascript:)",
+    "path_traversal": r"(?i)(\.\./|\.\.\\|%2e%2e|/etc/passwd)",
+}
 
 # Gate: only requests containing these tokens are worth an LLM call.
 # ponytail: naive signature pre-filter — it only decides what to *look* at;
@@ -42,7 +66,10 @@ SYSTEM = (
     "pattern (match the payload tokens, e.g. 'union\\s+select' or ';\\s*cat', NOT "
     "broad patterns that would block normal traffic);\n"
     "3. call raise_alert with concrete evidence and a one-line summary of what "
-    "happened and what you did.\n\n"
+    "happened and what you did.\n"
+    "4. if patch_vuln is available and containment alone is insufficient, call it "
+    "to raise the app's security posture (real eradication beyond the WAF). Note "
+    "it hardens the whole app, so reserve it for a confirmed, serious exploit.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -115,6 +142,69 @@ def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
 DISPATCH = {"blacklist_ip": do_blacklist_ip, "add_waf_rule": do_add_waf_rule,
             "raise_alert": do_raise_alert}
 
+# Register eradication tools (patch_vuln, and future lock_egress/kill_session/…).
+# Each REGISTER entry is {"name", "schema", "fn"}; accepts a single dict or a list.
+if REMEDIATION_REGISTER:
+    for _reg in (REMEDIATION_REGISTER if isinstance(REMEDIATION_REGISTER, list)
+                 else [REMEDIATION_REGISTER]):
+        TOOLS.append(_reg["schema"])
+        DISPATCH[_reg["name"]] = _reg["fn"]
+
+# Control-plane actions, folded in via the same {name,schema,fn} hook, with
+# dedupe so we never register a tool name the remediation module already took.
+if CONTROL_REGISTER:
+    _have = {t["name"] for t in TOOLS}
+    for _reg in CONTROL_REGISTER:
+        if _reg["name"] in _have:
+            continue
+        TOOLS.append(_reg["schema"])
+        DISPATCH[_reg["name"]] = _reg["fn"]
+        _have.add(_reg["name"])
+
+
+def record_action(tool, inp, result):
+    # mirror every executed action onto the dashboard timeline (actions.jsonl),
+    # whether it came from Claude's dispatch loop or from Jev autoblock.
+    store.append_jsonl(store.ACTIONS_FILE, {
+        "ts": store.now(), "kind": "action", "tool": tool, "input": inp, "result": result,
+    })
+
+
+def record_triage(e, escalated, outcome):
+    # one triage record per candidate the agent evaluated; powers the funnel + action log.
+    store.append_jsonl(store.ACTIONS_FILE, {
+        "ts": store.now(), "kind": "triage", "ip": e.get("ip"),
+        "method": e.get("method"), "path": e.get("path"), "query": e.get("query"),
+        "regex_hit": USE_REGEX_PREGATE, "jev": e.get("_jev"),
+        "escalated": escalated, "outcome": outcome,
+    })
+
+
+def autoblock(event, verdict):
+    """Jev-driven WAF enforcement — no LLM. Ban the IP, add the canned virtual
+    patch for the attack type, and alert. This is 'Jev in the WAF'."""
+    ip = event["ip"]
+    atk = verdict["attack_type"]
+    score = verdict.get("malicious_score") or 0.0
+    evidence = f"{event.get('method')} {event.get('path')}?{event.get('query', '')} {event.get('body', '')}".strip()
+    reason = f"Jev-confirmed {atk} (score {score:.2f})"
+    r1 = do_blacklist_ip(ip, reason)
+    record_action("blacklist_ip", {"ip": ip, "reason": reason}, r1)
+    actions = [r1]
+    rule = CANNED_WAF.get(atk)
+    if rule:
+        desc = f"auto: block {atk} (Jev)"
+        r2 = do_add_waf_rule(rule, desc)
+        record_action("add_waf_rule", {"pattern": rule, "description": desc}, r2)
+        actions.append(r2)
+    sev = "critical" if score >= 0.9 else "high"
+    summary = "Jev system-1 confirmed attack; " + "; ".join(actions)
+    r3 = do_raise_alert(sev, atk, ip, evidence, summary)
+    record_action("raise_alert", {"severity": sev, "attack_type": atk, "source_ip": ip,
+                                   "evidence": evidence, "summary": summary}, r3)
+    print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> banned + "
+          f"{'WAF rule + ' if rule else ''}email", flush=True)
+
 
 def send_email(inc):
     host = os.environ.get("SMTP_HOST", "localhost")
@@ -170,53 +260,67 @@ def analyse(client, events):
                 fn = DISPATCH.get(b.name)
                 out = fn(**b.input) if fn else f"unknown tool {b.name}"
                 print(f"[blue] ACTION {b.name}({b.input}) -> {out}")
-                # record the action on the dashboard timeline (powers the action log + replay)
-                store.append_jsonl(store.ACTIONS_FILE, {
-                    "ts": store.now(), "kind": "action", "tool": b.name,
-                    "input": b.input, "result": out,
-                })
+                record_action(b.name, b.input, out)  # onto the dashboard timeline
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
         messages.append({"role": "user", "content": results})
 
 
 def main():
-    client = anthropic.Anthropic()
-    print(f"[blue] watching {store.EVENTS_FILE} with {MODEL}", flush=True)
+    client = anthropic.Anthropic() if USE_CLAUDE else None
+    mode = "+".join(m for m, on in (("regex", USE_REGEX_PREGATE), ("Jev", USE_JEV),
+                                    ("autoblock", JEV_AUTOBLOCK and USE_JEV),
+                                    ("Claude", USE_CLAUDE)) if on) or "none"
+    print(f"[blue] watching {store.EVENTS_FILE}; pipeline: {mode}", flush=True)
+    if not USE_JEV and not USE_CLAUDE:
+        print("[blue] WARNING: no decision engine (no Jev key, no Anthropic key)",
+              file=sys.stderr, flush=True)
     offset = len(store.read_jsonl(store.EVENTS_FILE))  # skip pre-existing lines
     while True:
         evs = store.read_jsonl(store.EVENTS_FILE)
         new, offset = evs[offset:], len(evs)
         blocked_ips = {d["ip"] for d in store.load_state()["denylist"]}
-        # cheap regex pre-gate -> system-1 (Jev) classify -> escalate confirmed malicious
         candidates = [e for e in new if not e["blocked"] and e["ip"] not in blocked_ips
                       and (not USE_REGEX_PREGATE or is_suspicious(e))]
-        escalate = []
+        to_claude = []
         for e in candidates:
             if not USE_JEV:
                 e["_jev"] = None
-                esc = True
+                if USE_CLAUDE:
+                    to_claude.append(e)
+                    record_triage(e, escalated=True, outcome="claude")
+                else:
+                    record_triage(e, escalated=False, outcome="no_engine")
+                continue
+            v = classify_request(e)
+            e["_jev"] = v
+            if v.get("error"):                     # couldn't classify -> Claude if available
+                print(f"[blue] jev error ({e['ip']} {e['path']}): {v['error']}",
+                      file=sys.stderr, flush=True)
+                if USE_CLAUDE:
+                    to_claude.append(e)
+                    record_triage(e, escalated=True, outcome="claude")
+                else:
+                    record_triage(e, escalated=False, outcome="jev_error")
+                continue
+            if not v.get("malicious"):             # Jev says benign -> drop
+                record_triage(e, escalated=False, outcome="benign")
+                continue
+            print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
+                  f"{v['attack_type']} ({v['malicious_score']:.2f})", flush=True)
+            if JEV_AUTOBLOCK:
+                autoblock(e, v)                    # Jev drives the WAF directly
+                record_triage(e, escalated=True, outcome="autoblock")
+            elif USE_CLAUDE:
+                to_claude.append(e)
+                record_triage(e, escalated=True, outcome="claude")
             else:
-                v = classify_request(e)
-                e["_jev"] = v
-                esc = bool(v.get("malicious") or v.get("error"))  # fail-safe: escalate if Jev errors
-                if esc:
-                    print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
-                          f"malicious={v.get('malicious')} type={v.get('attack_type')} "
-                          f"score={v.get('malicious_score')}", flush=True)
-            # record the triage verdict on the dashboard timeline (powers the funnel)
-            store.append_jsonl(store.ACTIONS_FILE, {
-                "ts": store.now(), "kind": "triage", "ip": e.get("ip"),
-                "method": e.get("method"), "path": e.get("path"), "query": e.get("query"),
-                "regex_hit": USE_REGEX_PREGATE, "jev": e.get("_jev"), "escalated": esc,
-            })
-            if esc:
-                escalate.append(e)
-        if escalate:
-            print(f"[blue] {len(escalate)} confirmed-suspicious -> main agent", flush=True)
+                record_triage(e, escalated=False, outcome="no_engine")
+        if to_claude and client is not None:
+            print(f"[blue] {len(to_claude)} -> Claude (system-2)", flush=True)
             try:
-                analyse(client, escalate)
-            except Exception as e:
-                print(f"[blue] analyse error: {e}", file=sys.stderr, flush=True)
+                analyse(client, to_claude)
+            except Exception as ex:
+                print(f"[blue] analyse error: {ex}", file=sys.stderr, flush=True)
         time.sleep(POLL)
 
 

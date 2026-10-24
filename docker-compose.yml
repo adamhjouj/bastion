@@ -1,9 +1,37 @@
 services:
   dvwa:
     image: vulnerables/web-dvwa
-    ports: ["80:80"]
     restart: unless-stopped
   mailhog:
     image: mailhog/mailhog
-    ports: ["1025:1025", "8025:8025"]
+    ports: ["8025:8025"]        # web UI (SMTP :1025 stays internal)
     restart: unless-stopped
+  proxy:
+    build: .
+    image: bastion-app
+    command: ["./entrypoint-proxy.sh"]
+    environment:
+      DVWA_URL: http://dvwa:80
+    ports: ["8080:8080"]
+    volumes: ["bastion-data:/app/data"]
+    depends_on: [dvwa]
+    restart: unless-stopped
+  blue:
+    image: bastion-app
+    # tee into the shared volume so the dashboard console can stream blue-agent output
+    command: ["sh", "-c", "python -u blue_agent.py 2>&1 | tee -a /app/data/logs/blue.log"]
+    env_file: .env             # brings TYPESAFE_API_KEY (+ ANTHROPIC_API_KEY if set)
+    environment:
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
+      DVWA_URL: http://dvwa:80  # patch_vuln (remediation) talks directly to DVWA
+    # actuator.py reaches Docker (kill_session/egress/quarantine) via this socket.
+    # ponytail: docker.sock == host root; fine on a local demo box, split into an
+    # actuator sidecar if this leaves the demo so the LLM container holds no socket.
+    volumes:
+      - "bastion-data:/app/data"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    depends_on: [proxy, mailhog]
+    restart: unless-stopped
+volumes:
+  bastion-data:
