@@ -6,10 +6,12 @@ switches to its safe, parameterized/sanitized code path ("impossible" = DVWA's
 hardened source: prepared statements, CSRF tokens, output encoding). Stronger
 than a WAF rule or IP ban for clients that use the server's level.
 
-# ponytail: DVWA picks the level per-request from the 'security' cookie, so a
-# client that PINS security=low bypasses this. Full eradication needs the proxy
-# to strip/override that cookie (proxy's job). This tool raises the server level
-# and confirms it; it is not a universal patch on its own.
+# Cookie-bypass closed by a shared contract: DVWA reads the level per-request from
+# the inbound 'security' cookie, so a client that PINS security=low would bypass a
+# raised server level. On success patch_vuln records enforced_security in state.json;
+# the proxy strips/overrides the inbound 'security' cookie to that level (default
+# pass-through when unset). Setting 'low' clears enforcement (reset). # ponytail:
+# enforcement is proxy-side — this module only records intent.
 
 Exposed as an Anthropic tool (PATCH_VULN_TOOL) + a string-returning dispatch fn
 (do_patch_vuln) matching blue_agent.py's DISPATCH/TOOLS convention, so it can be
@@ -23,6 +25,7 @@ import re
 
 import httpx
 
+import store
 from bootstrap_dvwa import _token  # reuse the anti-CSRF token scraper
 
 LEVELS = ("low", "medium", "high", "impossible")
@@ -44,6 +47,18 @@ def _read_level(html):
     """DVWA's /security.php renders 'Security Level is currently: <em>X</em>'."""
     m = _CUR_RE.search(html or "")
     return m.group(1).lower() if m else None
+
+
+def _apply_enforcement(state, level):
+    """Record the security level the proxy must pin by stripping/overriding the
+    inbound 'security' cookie (closes patch_vuln's per-cookie bypass). 'low' is the
+    vulnerable baseline, so setting low CLEARS enforcement -> proxy passes through.
+    Pure: returns the mutated state; caller persists it."""
+    if level == "low":
+        state.pop("enforced_security", None)
+    else:
+        state["enforced_security"] = level
+    return state
 
 
 def patch_vuln(level="impossible", base_url=None):
@@ -72,8 +87,14 @@ def patch_vuln(level="impossible", base_url=None):
         c.close()
     except Exception as e:
         return {"ok": False, "requested": level, "error": str(e)}
-    return {"ok": new == level, "level": new, "requested": level,
-            "verified": new is not None}
+    ok = new == level
+    if ok:
+        # Record the enforced level so the proxy pins it (closes the cookie bypass).
+        try:
+            store.save_state(_apply_enforcement(store.load_state(), level))
+        except Exception:
+            pass  # enforcement is best-effort; the raise itself already succeeded
+    return {"ok": ok, "level": new, "requested": level, "verified": new is not None}
 
 
 def do_patch_vuln(level="impossible", **_):
@@ -85,10 +106,10 @@ def do_patch_vuln(level="impossible", **_):
         return (f"patch_vuln unconfirmed: could not verify DVWA security is now "
                 f"'{r['requested']}' (read back {r.get('level')!r}) — retry or check manually.")
     return (f"DVWA security level raised to '{r['level']}' — the vulnerable module now "
-            f"serves its safe/parameterized code path for sessions using the server "
-            f"level. CAVEAT: DVWA reads a per-request 'security' cookie, so a client "
-            f"that pins security=low still hits the vulnerable path; pair with a proxy "
-            f"rule that strips/overrides the 'security' cookie for full eradication.")
+            f"serves its safe/parameterized code path, and enforced_security='{r['level']}' "
+            f"was recorded in shared state so the proxy pins it by stripping/overriding the "
+            f"inbound 'security' cookie (closes the cookie-pinning bypass once the proxy "
+            f"override is active).")
 
 
 PATCH_VULN_TOOL = {

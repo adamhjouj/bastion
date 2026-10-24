@@ -21,4 +21,10 @@ assert rt.REGISTER["fn"] is rt.do_patch_vuln
 msg = rt.do_patch_vuln("banana")
 assert "failed" in msg, msg
 
+# enforced_security contract (pure): raising records the level for the proxy to
+# pin; 'low' is the vulnerable baseline so it CLEARS enforcement (reset).
+assert rt._apply_enforcement({}, "impossible")["enforced_security"] == "impossible"
+assert rt._apply_enforcement({"denylist": []}, "high")["enforced_security"] == "high"
+assert "enforced_security" not in rt._apply_enforcement({"enforced_security": "high"}, "low")
+
 print("remediation test: ALL PASSED")
