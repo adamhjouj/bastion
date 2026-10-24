@@ -54,6 +54,17 @@ def get_state():
     return _cache["state"], _cache["rules"]
 
 
+def _enforce_security_cookie(cookie_header, level):
+    """Strip any client-chosen `security` cookie and pin it to `level`, leaving other
+    cookies (PHPSESSID, …) intact. Closes the 'just set security=low' bypass after
+    patch_vuln raises the enforced level; a null level means pass-through (handled by
+    the caller, which only calls this when a level is set)."""
+    pairs = [c.strip() for c in (cookie_header or "").split(";") if c.strip()]
+    kept = [c for c in pairs if c.split("=", 1)[0].strip().lower() != "security"]
+    kept.append(f"security={level}")
+    return "; ".join(kept)
+
+
 def source_ip(request: Request) -> str:
     # ponytail: trust X-Forwarded-For for source IP (demo — lets the "external"
     # attacker have a distinct IP from localhost). NEVER trust XFF in production.
@@ -171,6 +182,9 @@ async def proxy(path: str, request: Request):
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
     fwd_headers["accept-encoding"] = "identity"  # no compression: keeps responses
     #                                              plaintext for logging/inspection
+    level = st.get("enforced_security")          # set by patch_vuln on a confirmed raise
+    if level:  # pin the server security posture; ignore the client's `security` cookie
+        fwd_headers["cookie"] = _enforce_security_cookie(fwd_headers.get("cookie"), level)
     try:
         up = await client.request(request.method, "/" + path,
                                   params=dict(request.query_params),
