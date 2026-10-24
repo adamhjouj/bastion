@@ -1,0 +1,4 @@
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=include.php","body":"","label":"benign","type":"benign","note":"include.php (the FP)"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1","body":"","label":"benign","type":"benign","note":"bare id=1 lookup"}
+{"method":"GET","path":"/search.php","query":"q=please select a date from the menu","body":"","label":"benign","type":"benign","note":"select...from in English"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=admin'--","label":"malicious","type":"sql_injection","note":"terse auth-bypass-ish"}
