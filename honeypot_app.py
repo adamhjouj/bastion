@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 import store
+from privacy import form_view
 
 app = FastAPI()
 
@@ -67,13 +68,17 @@ def _ip(request: Request) -> str:
 async def decoy(path: str, request: Request):
     body = await request.body()
     # store.DATA read at call time so a test can monkeypatch it to a tempdir.
+    ct = request.headers.get("content-type", "")
+    body_text = body.decode("utf-8", "ignore")[:2000]
+    if "application/x-www-form-urlencoded" in ct:
+        body_text = str(form_view(body_text))
     store.append_jsonl(store.DATA / "honeypot_hits.jsonl", {
         "ts": store.now(),
         "ip": _ip(request),
         "method": request.method,
         "path": "/" + path,
         "query": request.url.query,
-        "body": body.decode("utf-8", "ignore")[:500],
+        "body": body_text,
         "user_agent": request.headers.get("user-agent", ""),
     })
     delay = float(os.environ.get("HONEYPOT_DELAY", "0"))

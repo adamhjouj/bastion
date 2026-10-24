@@ -1,36 +1,63 @@
-"""Self-test for rate_limit: no network, no sleeps — rewind stored monotonic
-stamps instead of waiting, so it's fast and deterministic.
-Run: .venv/bin/python test_rate_limit.py"""
+"""Rate limiter: capacity control, per-IP isolation and LRU eviction."""
+import collections
+import time
+
+import pytest
+
 import rate_limit
 
-rate_limit.reset()
-rate_limit.RATE_LIMIT_MAX = 5
-rate_limit.RATE_LIMIT_WINDOW = 10.0
-rate_limit.RATE_LIMIT_ENABLED = True
 
-IP = "10.0.0.1"
-OTHER = "10.0.0.2"
+@pytest.fixture(autouse=True)
+def fresh():
+    rate_limit.reset()
+    rate_limit.RATE_LIMIT_MAX = 5
+    rate_limit.RATE_LIMIT_WINDOW = 60.0
+    rate_limit.RATE_LIMIT_ENABLED = True
+    yield
+    rate_limit.reset()
 
-# First MAX calls allowed, then limited.
-for i in range(5):
-    assert rate_limit.limited(IP) is False, f"call {i} should be allowed"
-assert rate_limit.limited(IP) is True, "6th call should be limited"
-assert rate_limit.limited(IP) is True, "stays limited on immediate repeat"
 
-# Per-IP independence: a different IP is unaffected while IP is limited.
-assert rate_limit.limited(OTHER) is False, "other IP must not be limited"
+def test_allows_up_to_limit():
+    for _ in range(5):
+        assert not rate_limit.limited("10.0.0.1")
 
-# Window recovery WITHOUT sleeping: rewind IP's stored stamps past the window.
-# _hits[ip] is a deque of time.monotonic() stamps (documented internal name).
-for i, t in enumerate(rate_limit._hits[IP]):
-    rate_limit._hits[IP][i] = t - (rate_limit.RATE_LIMIT_WINDOW + 1)
-assert rate_limit.limited(IP) is False, "window slid → allowed again"
 
-# Disabled: always False, records nothing.
-rate_limit.RATE_LIMIT_ENABLED = False
-rate_limit.reset()
-for i in range(50):
-    assert rate_limit.limited(IP) is False, "disabled must never limit"
-assert len(rate_limit._hits) == 0, "disabled records nothing"
+def test_blocks_over_limit():
+    for _ in range(5):
+        rate_limit.limited("10.0.0.1")
+    assert rate_limit.limited("10.0.0.1")
 
-print("rate_limit test: ALL PASSED")
+
+def test_per_ip_isolation():
+    for _ in range(5):
+        rate_limit.limited("10.0.0.1")
+    assert not rate_limit.limited("10.0.0.2")
+
+
+def test_window_recovery():
+    for _ in range(5):
+        rate_limit.limited("10.0.0.1")
+    assert rate_limit.limited("10.0.0.1")
+    dq = rate_limit._hits["10.0.0.1"]
+    for i in range(len(dq)):
+        dq[i] = dq[i] - (rate_limit.RATE_LIMIT_WINDOW + 1)
+    assert not rate_limit.limited("10.0.0.1")
+
+
+def test_disabled_never_limits():
+    rate_limit.RATE_LIMIT_ENABLED = False
+    for _ in range(50):
+        assert not rate_limit.limited("10.0.0.1")
+    assert len(rate_limit._hits) == 0
+
+
+def test_lru_eviction_bounded():
+    rate_limit.MAX_IDENTITIES = 3
+    for i in range(4):
+        rate_limit.limited(f"10.0.{i}.1")
+    assert len(rate_limit._hits) <= 3
+    rate_limit.MAX_IDENTITIES = 10000
+
+
+def test_retry_after_positive():
+    assert rate_limit.retry_after() >= 1

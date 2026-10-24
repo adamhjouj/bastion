@@ -89,8 +89,8 @@ def _resolve(target):
     if rc != 0:
         raise Rejected(f"docker ps failed: {err.strip() or rc}")
     ids = out.split()
-    if not ids:
-        raise Rejected(f"no running container for service {target!r}")
+    if len(ids) != 1:
+        raise Rejected(f"expected exactly one running container for service {target!r}, found {len(ids)}")
     return ids[0]
 
 
@@ -130,22 +130,47 @@ def _nets(cid):
     return set(out.split()) if rc == 0 else set()
 
 
+def _identity(cid, pid):
+    rc, out, _ = _docker("exec", cid, "cat", f"/proc/{pid}/stat")
+    try:
+        # comm can contain spaces/parentheses; fields after its final ')' start at state.
+        start = out.rsplit(")", 1)[1].split()[19]
+        if rc or not start.isdigit():
+            raise ValueError()
+        return (cid, pid, start)
+    except (IndexError, ValueError):
+        raise Rejected("cannot establish process identity")
+
+
 def capture_baseline():
-    """Snapshot each target's process set. Called at import (= agent boot) so
-    the attacker's later processes are NOT in the baseline and stay killable."""
-    for t in ALLOWED_TARGETS:
-        try:
-            _BASELINE[t] = frozenset(p for p, _ in _pids(_resolve(t)))
-        except Exception:
-            pass  # docker not reachable yet (e.g. socket not mounted) — skip
+    """Explicit startup snapshot. Container IDs and start times prevent PID-reuse trust."""
+    for target in ALLOWED_TARGETS:
+        cid = _resolve(target)
+        identities = []
+        for pid, _ in _pids(cid):
+            try:
+                identities.append(_identity(cid, pid))
+            except Rejected:
+                continue  # short-lived process exited during discovery
+        if not identities:
+            raise Rejected("baseline unavailable")
+        _BASELINE[target] = frozenset(identities)
 
 
 # ---- actions (grounding reads first, then the privileged verbs) ------------
 
 def list_processes(target):
-    procs = _pids(_resolve(target))
+    cid = _resolve(target)
     base = _BASELINE.get(target, frozenset())
-    lines = [f"pid={p} {'[baseline]' if p in base else '[NEW]'} {cmd}" for p, cmd in procs]
+    lines = []
+    for pid, cmd in _pids(cid):
+        try:
+            identity = _identity(cid, pid)
+        except Rejected:
+            continue
+        executable = cmd.split()[0] if cmd else "unknown"
+        protected = identity in base or pid == 1 or executable.rsplit("/", 1)[-1] in {"apache2", "httpd", "mysqld", "mariadbd", "php-fpm", "init", "supervisord"}
+        lines.append(f"pid={pid} start_time={identity[2]} {'[protected]' if protected else '[candidate, NOT proof]'} {executable}")
     return "processes in {}:\n{}".format(target, "\n".join(lines) or "(none)")
 
 
@@ -158,22 +183,28 @@ def list_sessions(target):
     return "active sessions in {}: {}".format(target, ", ".join(ids) or "(none)")
 
 
-def kill_process(target, pid):
+def kill_process(target, pid, start_time):
     cid = _resolve(target)
     pid = _pos_int(pid)
     base = _BASELINE.get(target)
-    if base is None:
-        raise Rejected("no boot baseline captured — refusing to kill (cannot tell "
-                       "attacker procs from system procs)")
-    live = {p for p, _ in _pids(cid)}
-    if pid not in live:
-        raise Rejected(f"pid {pid} not running in {target}")
-    if pid in base:
-        raise Rejected(f"pid {pid} is a baseline/system process — protected")
-    rc, _, err = _docker("exec", cid, "kill", "-9", str(pid))
-    if rc != 0:
-        raise Rejected(f"kill failed: {err.strip() or rc}")
-    return f"killed non-baseline pid {pid} in {target}"
+    if not base or any(identity[0] != cid for identity in base):
+        raise Rejected("missing or stale baseline; operator must verify target after restart")
+    identity = _identity(cid, pid)
+    if str(start_time) != identity[2] or identity in base or pid == 1:
+        raise Rejected("stale identity or protected process")
+    cmd = next((cmd for p, cmd in _pids(cid) if p == pid), "")
+    executable = cmd.split()[0].rsplit("/", 1)[-1] if cmd else ""
+    if not executable or executable in {"apache2", "httpd", "mysqld", "mariadbd", "php-fpm", "init", "supervisord"}:
+        raise Rejected("protected service process")
+    # Linux pidfd pins the process before identity verification, avoiding check/kill PID reuse.
+    # If target lacks modern Python/pidfd support, refuse rather than fall back to unsafe kill.
+    helper = ("import os,signal,sys; p=int(sys.argv[1]); fd=os.pidfd_open(p); "
+              "s=open('/proc/%d/stat'%p).read().rsplit(')',1)[1].split()[19]; "
+              "assert s==sys.argv[2], 'stale identity'; signal.pidfd_send_signal(fd,signal.SIGKILL)")
+    rc, _, _ = _docker("exec", cid, "python3", "-c", helper, str(pid), str(start_time))
+    if rc:
+        raise Rejected("safe kill unavailable or identity changed; target needs Python with pidfd support")
+    return f"killed verified candidate pid {pid} in {target}"
 
 
 def kill_session(target, session_id):
@@ -265,18 +296,30 @@ def rotate_secret(target):
     # a transactional rotation would need app cooperation.
     expr = r"s#\(db_password'[^']*=[^']*'\)[^']*#\1" + new + "#"
     rc, _, err = _docker("exec", cid, "sed", "-i", expr, path)
-    if rc != 0:  # config now out of sync — roll the DB back so the app keeps serving
-        _docker("exec", cid, "mysql", "-u", "root", "-e",
-            f"SET PASSWORD FOR '{user}'@'localhost' = PASSWORD('{old}');")
-        raise Rejected("config update failed, rolled DB password back: "
-                       + (err.strip() or str(rc)).replace(new, "***"))
+    def rollback():
+        # Hex literal avoids interpolating a potentially compromised old password into SQL.
+        old_expr = "0x" + old.encode().hex() if old else "''"
+        db_rc = _docker("exec", cid, "mysql", "-u", "root", "-e",
+                       f"SET PASSWORD FOR '{user}'@'localhost' = PASSWORD({old_expr});")[0]
+        escaped = old.replace("\\", "\\\\").replace("&", "\\&").replace("#", "\\#")
+        reset_expr = r"s#\(db_password'[^']*=[^']*'\)[^']*#\1" + escaped + "#"
+        cfg_rc = _docker("exec", cid, "sed", "-i", reset_expr, path)[0]
+        verified = _docker("exec", cid, "mysql", "-u", user, f"--password={old}", "-e", "SELECT 1")[0] == 0
+        return not db_rc and not cfg_rc and verified
+
+    if rc != 0:
+        recovered = rollback()
+        raise Rejected(f"rotation failed; rollback_verified={recovered}; "
+                       + ("old credentials restored" if recovered else "OPERATOR RECOVERY REQUIRED"))
 
     # 3. verify: new creds work AND the old (possibly stolen) creds are dead.
     #    --password= form (not -p) so an empty old password can't trigger a prompt.
     new_ok = _docker("exec", cid, "mysql", "-u", user, f"--password={new}", "-e", "SELECT 1")[0] == 0
     old_dead = _docker("exec", cid, "mysql", "-u", user, f"--password={old}", "-e", "SELECT 1")[0] != 0
     if not (new_ok and old_dead):
-        raise Rejected(f"rotation unverified (new_ok={new_ok}, old_dead={old_dead})")
+        recovered = rollback()
+        raise Rejected(f"rotation verification failed; rollback_verified={recovered}; "
+                       + ("old credentials restored" if recovered else "OPERATOR RECOVERY REQUIRED"))
     return (f"rotated DB password for '{user}' in {target}: stolen credentials are now "
             f"invalid, app config updated, verified (old rejected, new works). "
             f"New secret not logged.")
@@ -291,18 +334,20 @@ _T = {"type": "object", "properties": {"target": {"type": "string",
 CONTROL_TOOLS = [
     {"name": "list_processes", "description":
      "List processes in the target container, each marked [baseline] (present at "
-     "boot, protected) or [NEW] (spawned since — a possible attacker process). "
+     "boot, protected) or a candidate (new is NOT proof of compromise). "
      "Use this to GROUND a kill_process call on a real pid.", "input_schema": _T},
     {"name": "list_sessions", "description":
      "List active application session ids in the target. Use to ground kill_session.",
      "input_schema": _T},
     {"name": "kill_process", "description":
      "Kill ONE attacker-spawned process (e.g. a reverse shell from RCE). Only a "
-     "live, non-baseline pid can be killed; system processes are refused.",
+     "live, non-baseline identity can be killed; system processes are refused. "
+     "Requires operator policy and Linux pidfd support in the target.",
      "input_schema": {"type": "object", "properties": {
          "target": _T["properties"]["target"],
-         "pid": {"type": "integer", "description": "pid from list_processes marked [NEW]"}},
-         "required": ["target", "pid"]}},
+         "pid": {"type": "integer", "description": "confirmed malicious candidate PID"},
+         "start_time": {"type": "string", "pattern": "^[0-9]+$", "description": "identity from list_processes"}},
+         "required": ["target", "pid", "start_time"]}},
     {"name": "kill_session", "description":
      "Invalidate the attacker's application session server-side (force-logout). "
      "Beats an authenticated or agentic attacker even if it rotates IP.",
@@ -378,11 +423,8 @@ REGISTER = [{"name": t["name"], "schema": t,
              "fn": (lambda _n=t["name"], **p: run_tool(_n, p))} for t in CONTROL_TOOLS]
 
 
-# best-effort baseline at import == at agent boot (guarded: never breaks import)
-try:
-    capture_baseline()
-except Exception:  # noqa: BLE001
-    pass
+# No Docker or network work at import. The isolated actuator captures its baseline
+# explicitly at startup; stale/missing baselines fail closed for process termination.
 
 
 # ---- self-test (no real containers touched) --------------------------------

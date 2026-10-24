@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# Proxy container entrypoint: wait for DVWA, bootstrap it, reset demo state, serve.
-set -e
-echo "[proxy-entry] waiting for DVWA at ${DVWA_URL} ..."
-python - <<'PY'
-import os, time, httpx
-url = os.environ.get("DVWA_URL", "http://dvwa:80")
-for _ in range(90):
-    try:
-        httpx.get(url + "/login.php", timeout=3)
-        break
-    except Exception:
-        time.sleep(2)
-PY
-echo "[proxy-entry] bootstrapping DVWA ..."
-python bootstrap_dvwa.py "${DVWA_URL}" || echo "[proxy-entry] bootstrap warning (continuing)"
-echo "[proxy-entry] resetting demo state ..."
-mkdir -p /app/data /app/data/logs
-: > /app/data/events.jsonl; : > /app/data/incidents.jsonl; : > /app/data/actions.jsonl
-: > /app/data/logs/proxy.log; : > /app/data/logs/blue.log
-: > /app/data/logs/dvwa.log; : > /app/data/logs/red.log
-echo '{"denylist":[],"rules":[],"seen_ips":{}}' > /app/data/state.json
-echo "[proxy-entry] starting reverse proxy on :8080 ..."
-# Tee proxy output into the shared volume so the dashboard console can stream it.
-# (No exec, so the pipeline survives; the shell stays PID 1 and forwards signals.)
-uvicorn proxy:app --host 0.0.0.0 --port 8080 --log-level info 2>&1 | tee -a /app/data/logs/proxy.log
+# Wait for DVWA, initialize the store (idempotent), then serve.
+# Does NOT reset defenses, events or logs between restarts.
+set -euo pipefail
+
+DVWA_URL="${DVWA_URL:-http://dvwa:80}"
+
+echo "[proxy] waiting for DVWA at ${DVWA_URL} ..."
+for i in $(seq 1 60); do
+    curl -sf "${DVWA_URL}/login.php" -o /dev/null && break
+    [ "$i" = 60 ] && { echo "[proxy] DVWA not ready after 60s"; exit 1; }
+    sleep 2
+done
+
+echo "[proxy] verifying DVWA login ..."
+python bootstrap_dvwa.py "${DVWA_URL}" || {
+    echo "[proxy] WARNING: DVWA login failed; DB may need explicit initialization"
+    echo "[proxy] Run: docker compose exec dvwa python bootstrap_dvwa.py \$DVWA_URL --reset-confirm RESET-DVWA"
+}
+
+mkdir -p /app/data/logs
+echo "[proxy] starting reverse proxy on :8080 (mode: ${BASTION_MODE:-observe})"
+exec uvicorn proxy:app --host 0.0.0.0 --port 8080 --log-level info

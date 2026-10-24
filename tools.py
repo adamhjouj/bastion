@@ -32,8 +32,7 @@ def do_get_defenses(**_):
     actions and reason about what is already contained."""
     st = store.load_state()
     return json.dumps({
-        "denylist": st.get("denylist", []),          # banned IPs (+ 'expires' if provisional)
-        "waf_rules": st.get("rules", []),             # active virtual patches
+        "denylist": [d for d in st.get("denylist", []) if store.active_ban(d)],
         "honeypot_diverts": st.get("honeypot", []),   # IPs silently routed to the decoy
         "enforced_security": st.get("enforced_security"),  # app hardening pinned by patch_vuln
     }, indent=2)
@@ -58,21 +57,8 @@ def do_service_status(**_):
     """Which containers make up the environment and their state (running / paused /
     exited) — so the agent knows what it is defending and whether a prior containment
     action (quarantine/isolate) is in effect. Best-effort; needs the docker socket."""
-    try:
-        import actuator  # reuse its single docker-CLI boundary (no 2nd impl)
-        rc, out, err = actuator._docker(
-            "ps", "-a", "--format", "{{.Label \"com.docker.compose.service\"}}\t{{.Names}}\t{{.State}}",
-            "--filter", f"label=com.docker.compose.project={actuator.PROJECT}")
-        if rc != 0:
-            return json.dumps({"error": err.strip() or f"docker rc={rc}"})
-        rows = []
-        for ln in out.splitlines():
-            parts = ln.split("\t")
-            if len(parts) == 3:
-                rows.append({"service": parts[0], "container": parts[1], "state": parts[2]})
-        return json.dumps(rows, indent=2)
-    except Exception as e:
-        return json.dumps({"error": f"service_status unavailable: {e}"})
+    from actuator_client import call_tool
+    return call_tool("service_status", {})
 
 
 def _clamp(v, lo, hi, default):
@@ -92,7 +78,7 @@ ORIENT_REGISTER = [
     {"name": "get_defenses", "fn": do_get_defenses, "schema": _SCHEMA(
         "get_defenses",
         "Read-only. List everything you are CURRENTLY enforcing: banned IPs (with any "
-        "'expires' for provisional bans), active WAF rules, honeypot diverts, and the "
+        "'expires' for provisional bans), honeypot diverts, and the "
         "pinned app security level. Call this FIRST to orient and to avoid duplicating "
         "an action already in place.")},
     {"name": "recent_requests", "fn": do_recent_requests, "schema": _SCHEMA(
@@ -124,9 +110,9 @@ _GROUPS = [
       "inspect_target", "list_processes", "list_sessions"]),
     ("CONTAINMENT (stop/limit the attacker)",
      ["blacklist_ip", "bulk_blacklist_ip", "divert_to_honeypot", "undivert", "isolate_egress",
-      "quarantine_container", "release_container", "kill_process", "kill_session"]),
-    ("ERADICATION / VIRTUAL PATCH (fix or neutralize the hole)",
-     ["add_waf_rule", "patch_vuln", "rotate_secret"]),
+      "quarantine_container", "release_container", "kill_process", "kill_session", "unban_ip"]),
+    ("REMEDIATION (fix or neutralize the hole)",
+     ["patch_vuln", "rotate_secret"]),
     ("ALERTING",
      ["raise_alert"]),
 ]
@@ -173,15 +159,15 @@ ENVIRONMENT = (
     "You are an autonomous blue-team SOC agent defending a live web application (DVWA) "
     "in a Docker network. A reverse proxy sits in front of the app and is BOTH your "
     "sensor and your enforcement point: it logs every HTTP request, and on each request "
-    "it reads your denylist, WAF rules, honeypot diverts, and pinned security level from "
-    "shared state and enforces them immediately (no restart). So any tool you call takes "
-    "effect on the very next matching request.\n"
-    "Topology: attacker → proxy (:8080, your WAF) → DVWA (:80). A honeypot decoy exists "
+    "it reads your denylist, honeypot diverts, and pinned security level from "
+    "transactional state and enforces committed defenses on subsequent requests. "
+    "Model classification may be inline or asynchronous according to deployment policy.\n"
+    "Topology: attacker → proxy (:8080) → DVWA (:80). A honeypot decoy exists "
     "for diversion; alert email is captured by MailHog. You reach DVWA's own container "
-    "(and only the targets you are allowed) through named control-plane tools — you never "
-    "get a shell; each tool is one fixed, validated action.\n"
-    "A fast system-1 classifier (Jev) pre-flags suspicious requests and may have ALREADY "
-    "placed a short-TTL provisional ban on an IP. A flag is a reason to LOOK, not proof. "
+    "through an authenticated isolated actuator. Tools are named, validated and "
+    "independently gated by deployment policy; you do not have Docker or shell access.\n"
+    "A fast system-1 classifier (Jev), when configured, flags requests and may have ALREADY "
+    "placed a reversible diversion on an IP. A flag is a reason to LOOK, not proof. "
     "Your job (system-2) is to investigate with the read-only tools, decide with judgment, "
     "and respond proportionally — then stop. You are the reasoning the raw score lacks."
 )

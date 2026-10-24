@@ -1,52 +1,102 @@
+name: bastion
+
 services:
   dvwa:
     image: vulnerables/web-dvwa
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/login.php"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
     restart: unless-stopped
+
   mailhog:
     image: mailhog/mailhog
-    ports: ["8025:8025"]        # web UI (SMTP :1025 stays internal)
+    ports: ["8025:8025"]
     restart: unless-stopped
-  proxy:
-    build: .
-    image: bastion-app
-    command: ["./entrypoint-proxy.sh"]
-    environment:
-      DVWA_URL: http://dvwa:80
-      HONEYPOT_URL: http://honeypot:9000   # diverted IPs land here instead of DVWA
-      # Per-IP flood/brute-force cap (rate_limit.py). Tune here; no secrets in the proxy.
-      RATE_LIMIT_MAX: "100"                 # max requests per window, per source IP
-      RATE_LIMIT_WINDOW: "10"               # sliding window, seconds
-      RATE_LIMIT_ENABLED: "1"               # 0 disables
-    ports: ["8080:8080"]
-    volumes: ["bastion-data:/app/data"]
-    depends_on: [dvwa, honeypot]
-    restart: unless-stopped
+
   honeypot:
     image: bastion-app
     command: ["python", "honeypot_app.py"]
     environment:
       HONEYPOT_PORT: "9000"
-    # ponytail: decoy shares the data volume only to append honeypot_hits.jsonl — it has
-    # NO DVWA/MySQL access and serves one static fake page. For a real deploy put it on an
-    # internal (no-egress) network so a curious attacker can't pivot out of the landing zone.
+      BASTION_DATA_DIR: /app/data
     volumes: ["bastion-data:/app/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
-  blue:
+
+  # The ingress proxy enforces bans, rate limits, diversions and inline Jev.
+  # It has no Docker socket. The management endpoints require MANAGEMENT_TOKEN.
+  proxy:
+    build: .
     image: bastion-app
-    # tee into the shared volume so the dashboard console can stream blue-agent output
-    command: ["sh", "-c", "python -u blue_agent.py 2>&1 | tee -a /app/data/logs/blue.log"]
-    env_file: .env             # brings TYPESAFE_API_KEY (+ ANTHROPIC_API_KEY if set)
+    command: ["sh", "-c", "./entrypoint-proxy.sh 2>&1 | tee /app/data/logs/proxy.log"]
+    env_file: .env
     environment:
-      SMTP_HOST: mailhog
-      SMTP_PORT: "1025"
-      DVWA_URL: http://dvwa:80  # patch_vuln (remediation) talks directly to DVWA
-    # actuator.py reaches Docker (kill_session/egress/quarantine) via this socket.
-    # ponytail: docker.sock == host root; fine on a local demo box, split into an
-    # actuator sidecar if this leaves the demo so the LLM container holds no socket.
+      DVWA_URL: http://dvwa:80
+      HONEYPOT_URL: http://honeypot:9000
+      BASTION_DATA_DIR: /app/data
+      # Defaults; override in .env
+      RATE_LIMIT_MAX: "100"
+      RATE_LIMIT_WINDOW: "10"
+      BASTION_MODE: "${BASTION_MODE:-observe}"
+    ports: ["8080:8080"]
+    volumes: ["bastion-data:/app/data"]
+    depends_on:
+      dvwa:
+        condition: service_healthy
+      honeypot:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The actuator has the Docker socket. It is NOT network-reachable from outside.
+  # The blue agent reaches it via ACTUATOR_URL over the internal network.
+  actuator:
+    build:
+      context: .
+      target: actuator
+    image: bastion-actuator
+    command: ["python", "-m", "uvicorn", "actuator_app:app", "--host", "0.0.0.0", "--port", "9010"]
+    environment:
+      BASTION_PROJECT: bastion
+      BASTION_TARGETS: dvwa
+      BASTION_DATA_DIR: /app/data
+      ACTUATOR_TOKEN: "${ACTUATOR_TOKEN}"
+      DVWA_URL: http://dvwa:80
+      ALLOW_DESTRUCTIVE: "${ALLOW_DESTRUCTIVE:-0}"
     volumes:
       - "bastion-data:/app/data"
       - "/var/run/docker.sock:/var/run/docker.sock"
-    depends_on: [proxy, mailhog]
+    depends_on:
+      dvwa:
+        condition: service_healthy
     restart: unless-stopped
+
+  blue:
+    image: bastion-app
+    command: ["sh", "-c", "python -u blue_agent.py 2>&1 | tee /app/data/logs/blue.log"]
+    env_file: .env
+    environment:
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
+      DVWA_URL: http://dvwa:80
+      ACTUATOR_URL: http://actuator:9010
+      BASTION_DATA_DIR: /app/data
+      BASTION_MODE: "${BASTION_MODE:-observe}"
+      ACTUATOR_TOKEN: "${ACTUATOR_TOKEN}"
+    volumes: ["bastion-data:/app/data"]
+    depends_on:
+      proxy:
+        condition: service_started
+      actuator:
+        condition: service_started
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   bastion-data:

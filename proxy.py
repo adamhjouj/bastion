@@ -1,235 +1,187 @@
-"""Reverse proxy in front of DVWA. It is BOTH the log source and the
-enforcement point: every request is logged to events.jsonl, and requests from
-a blacklisted IP or matching an active WAF rule get a 403 before they ever
-reach the app. Also serves the dashboard (/__dashboard) and its data (/__state).
-
-# ponytail: demo proxy — no TLS, naive forwarding, single worker, body buffered
-# in memory. Swap for Caddy + ModSecurity if it must survive real traffic.
-"""
+"""Bounded ingress with optional inline Jev, authenticated management and durable events."""
 import asyncio
+import contextlib
 import json
 import os
-import re
+import time
+import uuid
 from pathlib import Path
-from urllib.parse import unquote_plus
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 import rate_limit
 import store
+from classifier import AsyncClassifier
+from privacy import request_view
+from security import authorize, source_ip as resolve_source
+from settings import Settings
 
-DVWA_URL = os.environ.get("DVWA_URL", "http://localhost:80")
-HONEYPOT_URL = os.environ.get("HONEYPOT_URL")  # decoy base url; divert disabled if unset
 BASE = Path(__file__).resolve().parent
-
-app = FastAPI()
-client = httpx.AsyncClient(base_url=DVWA_URL, follow_redirects=False, timeout=15)
-honeypot_client = (httpx.AsyncClient(base_url=HONEYPOT_URL, follow_redirects=False, timeout=15)
-                   if HONEYPOT_URL else None)
-
-# hop-by-hop headers we must not forward verbatim
-HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer",
-       "upgrade", "proxy-authorization", "proxy-authenticate",
-       "content-length", "host",
-       # httpx already decompresses up.content, so a forwarded Content-Encoding
-       # header would make the client double-decode. Strip it both ways.
-       "content-encoding"}
-
-# compiled-rule cache, refreshed when state.json's mtime changes
-_cache = {"mtime": -1.0, "state": store.DEFAULT_STATE, "rules": []}
-
-
-def get_state():
-    try:
-        m = store.STATE_FILE.stat().st_mtime
-    except FileNotFoundError:
-        return store.load_state(), []
-    if m != _cache["mtime"]:
-        st = store.load_state()
-        compiled = []
-        for r in st.get("rules", []):
-            try:
-                compiled.append((re.compile(r["pattern"], re.I), r.get("description", "")))
-            except re.error:
-                pass
-        _cache.update(mtime=m, state=st, rules=compiled)
-    return _cache["state"], _cache["rules"]
+HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
+       "proxy-authorization", "proxy-authenticate", "content-length", "host", "content-encoding"}
 
 
 def _enforce_security_cookie(cookie_header, level):
-    """Strip any client-chosen `security` cookie and pin it to `level`, leaving other
-    cookies (PHPSESSID, …) intact. Closes the 'just set security=low' bypass after
-    patch_vuln raises the enforced level; a null level means pass-through (handled by
-    the caller, which only calls this when a level is set)."""
-    pairs = [c.strip() for c in (cookie_header or "").split(";") if c.strip()]
-    kept = [c for c in pairs if c.split("=", 1)[0].strip().lower() != "security"]
-    kept.append(f"security={level}")
-    return "; ".join(kept)
+    kept = [p.strip() for p in (cookie_header or "").split(";") if p.strip() and p.split("=", 1)[0].strip().lower() != "security"]
+    return "; ".join(kept + [f"security={level}"])
 
 
-def source_ip(request: Request) -> str:
-    # ponytail: trust X-Forwarded-For for source IP (demo — lets the "external"
-    # attacker have a distinct IP from localhost). NEVER trust XFF in production.
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _event(ip, method, path, qs, body, status, blocked, matched):
-    # Decode for display + detection so URL-encoded payloads (%27 -> ') are
-    # human-readable and matchable. Forwarding still uses the original bytes.
-    return {
-        "ts": store.now(), "ip": ip, "method": method, "path": "/" + path,
-        "query": unquote_plus(qs),
-        "body": unquote_plus(body.decode("utf-8", "ignore"))[:300],
-        "status": status, "blocked": blocked, "matched": matched,
-    }
-
-
-@app.get("/__dashboard", response_class=HTMLResponse)
-async def dashboard():
-    return (BASE / "dashboard.html").read_text()
-
-
-# Files whose mtime changing means "something happened" (for SSE push).
-_WATCH = [store.EVENTS_FILE, store.STATE_FILE, store.INCIDENTS_FILE, store.ACTIONS_FILE,
-          store.DVWA_LOG, store.PROXY_LOG, store.BLUE_LOG, store.RED_LOG]
+def get_state():
+    return store.load_state()
 
 
 def build_state():
-    """Everything the dashboard renders, in one snapshot."""
-    st, _ = get_state()
-    return {
-        "events": store.read_jsonl(store.EVENTS_FILE, limit=200)[::-1],
-        "events_total": store.count_lines(store.EVENTS_FILE),
-        "actions": store.read_jsonl(store.ACTIONS_FILE, limit=400)[::-1],
-        "incidents": store.read_jsonl(store.INCIDENTS_FILE)[::-1],
-        "denylist": st.get("denylist", []),
-        "rules": st.get("rules", []),
-        "logs": {
-            "dvwa": store.tail_lines(store.DVWA_LOG),
-            "proxy": store.tail_lines(store.PROXY_LOG),
-            "blue": store.tail_lines(store.BLUE_LOG),
-            "red": store.tail_lines(store.RED_LOG),
-        },
-    }
+    return store.snapshot()
 
 
-def _watch_sig():
-    sig = []
-    for p in _WATCH:
+def source_ip(request):
+    return resolve_source(request, request.app.state.settings)
+
+
+def create_app(settings=None, upstream_transport=None, classifier_transport=None):
+    policy = settings or Settings.from_env()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        policy.validate()
+        store.initialize()
+        # Lifespan: prefer shared instances created above; replace when lifespan fires.
+        app.state.http = httpx.AsyncClient(timeout=15, follow_redirects=False, transport=upstream_transport,
+                                            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
+        app.state.classifier = AsyncClassifier(policy, transport=classifier_transport)
+        store.set_health("proxy", {"mode": policy.mode, "ready": True,
+                                   "warning": "no payload protection" if policy.mode == "observe" else None})
         try:
-            sig.append(p.stat().st_mtime)
-        except FileNotFoundError:
-            sig.append(0.0)
-    return tuple(sig)
+            yield
+        finally:
+            await app.state.http.aclose()
+            await app.state.classifier.close()
+            store.set_health("proxy", {"mode": policy.mode, "ready": False})
 
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.settings = policy
 
-@app.get("/__state")
-async def state_api():
-    return JSONResponse(build_state())
+    # Eagerly initialise shared state so the app works under ASGITransport in tests
+    # where lifespan may not fire. Idempotent: initialize() is a no-op after first call.
+    store.initialize()
+    http_client = httpx.AsyncClient(timeout=15, follow_redirects=False, transport=upstream_transport,
+                                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
+    clf = AsyncClassifier(policy, transport=classifier_transport)
 
+    @app.middleware("http")
+    async def management_boundary(request, call_next):
+        if request.url.path.startswith("/__"):
+            try:
+                authorize(request, policy.management_token)
+            except HTTPException as exc:
+                return JSONResponse({"error": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if request.url.path.startswith("/__"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+        return response
 
-@app.get("/__stream")
-async def stream_api():
-    """Server-Sent Events: push a fresh snapshot whenever any watched file changes."""
-    async def gen():
-        last = None
-        beat = 0
-        while True:
-            sig = _watch_sig()
-            if sig != last:
-                last = sig
-                yield "data: " + json.dumps(build_state()) + "\n\n"
-            else:
-                beat += 1
-                if beat % 20 == 0:  # ~10s keep-alive comment
+    @app.get("/__health")
+    async def health():
+        return {"mode": policy.mode, "ready": True, "health": store.snapshot()["health"]}
+
+    @app.get("/__dashboard", response_class=HTMLResponse)
+    async def dashboard():
+        return (BASE / "dashboard.html").read_text()
+
+    @app.get("/__state")
+    async def state_api():
+        return build_state()
+
+    @app.get("/__stream")
+    async def stream(request: Request):
+        async def generate():
+            last = None
+            while not await request.is_disconnected():
+                snapshot = json.dumps(build_state(), sort_keys=True)
+                if snapshot != last:
+                    last = snapshot
+                    yield "data: " + snapshot + "\n\n"
+                else:
                     yield ": keep-alive\n\n"
-            await asyncio.sleep(0.5)
-    return StreamingResponse(gen(), media_type="text/event-stream")
+                await asyncio.sleep(1)
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
-
-@app.api_route("/{path:path}",
-               methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-async def proxy(path: str, request: Request):
-    ip = source_ip(request)
-    body = await request.body()
-    qs = request.url.query
-    # Decode before WAF matching so rules written against readable payloads
-    # (e.g. 'union\s+select') catch url-encoded attacks too.
-    probe = f"{request.method} /{path}?{unquote_plus(qs)} {unquote_plus(body.decode('utf-8', 'ignore'))}"
-    st, rules = get_state()
-
-    # 0. Honeypot divert — DELIBERATELY takes precedence over the denylist AND WAF rules
-    #    below. A studied attacker should keep reaching the decoy with ALL their traffic
-    #    (even payloads that would otherwise 403): a block tips them off and ends the TTP
-    #    harvest, a silent divert does not. To fully cut an IP off, undivert it first, then
-    #    the denylist 403 applies. Logged as 'diverted' (blocked=False), never a block.
-    if honeypot_client is not None and any(d["ip"] == ip for d in st.get("honeypot", [])):
-        hp_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
-        hp_headers["accept-encoding"] = "identity"
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+    async def forward(path: str, request: Request):
+        ip = source_ip(request)
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > policy.request_limit:
+                return JSONResponse({"error": "request too large"}, status_code=413)
+        raw_query = request.scope["query_string"]
+        event = request_view(request.method, "/" + path, raw_query.decode("ascii", "replace"),
+                             body.decode("utf-8", "replace"), request.headers.get("content-type", ""))
+        event.update(ts=store.now(), ip=ip, request_id=uuid.uuid4().hex, blocked=False,
+                     status=None, matched=None, mode=policy.mode, truncated=False)
         try:
-            up = await honeypot_client.request(request.method, "/" + path,
-                                               params=dict(request.query_params),
-                                               content=body, headers=hp_headers)
-        except httpx.HTTPError as e:
-            store.append_jsonl(store.EVENTS_FILE,
-                               _event(ip, request.method, path, qs, body, 502, False, "diverted"))
-            return JSONResponse({"error": "upstream", "detail": str(e)}, status_code=502)
-        store.append_jsonl(store.EVENTS_FILE,
-                           _event(ip, request.method, path, qs, body, up.status_code, False, "diverted"))
-        resp_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP}
-        return Response(content=up.content, status_code=up.status_code, headers=resp_headers)
+            event_id = store.reserve_event(event, policy.queue_limit)
+        except OverflowError:
+            store.set_health("queue", {"available": False, "error": "capacity exhausted"})
+            return JSONResponse({"error": "investigation capacity exhausted"}, status_code=503, headers={"Retry-After": "5"})
+        event["case_id"] = str(event_id)
+        started = time.monotonic()
 
-    # 1. IP denylist (skip entries whose TTL has expired — provisional reflex bans
-    #    auto-lift; a null/absent 'expires' is a permanent ban)
-    _now = store.now()
-    if any(d["ip"] == ip and (not d.get("expires") or d["expires"] > _now)
-           for d in st.get("denylist", [])):
-        store.append_jsonl(store.EVENTS_FILE,
-                           _event(ip, request.method, path, qs, body, 403, True, "denylist"))
-        return JSONResponse({"error": "blocked",
-                             "reason": "source IP blacklisted by blue-team agent"},
-                            status_code=403)
+        def result(response, matched=None, blocked=False):
+            event.update(status=response.status_code, matched=matched, blocked=blocked,
+                         duration_ms=round((time.monotonic() - started) * 1000))
+            store.finalize_event(event_id, event, observe=policy.mode == "observe")
+            response.headers["X-Request-ID"] = event["request_id"]
+            return response
 
-    # 1.5 Per-IP rate limit — flood / brute-force / scrape cap, BEFORE the WAF loop so a
-    #     burst is shed cheaply (no regex scan, no agent call). Diverted + banned IPs were
-    #     already handled above. Disabled → always passes (RATE_LIMIT_ENABLED=0).
-    if rate_limit.limited(ip):
-        store.append_jsonl(store.EVENTS_FILE,
-                           _event(ip, request.method, path, qs, body, 429, True, "rate_limit"))
-        return JSONResponse({"error": "rate_limited", "reason": "too many requests"},
-                            status_code=429,
-                            headers={"Retry-After": str(rate_limit.retry_after())})
+        st = store.load_state()
+        honeypot_url = os.getenv("HONEYPOT_URL", "")
+        divert = bool(honeypot_url and any(d["ip"] == ip for d in st.get("honeypot", [])))
+        if not divert:
+            if any(d["ip"] == ip and store.active_ban(d) for d in st.get("denylist", [])):
+                return result(JSONResponse({"error": "blocked"}, status_code=403), "denylist", True)
+            if rate_limit.limited(ip):
+                return result(JSONResponse({"error": "capacity limit"}, status_code=429,
+                                          headers={"Retry-After": str(rate_limit.retry_after())}), "rate_limit", True)
+            if policy.mode == "inline":
+                clf_instance = getattr(app.state, "classifier", clf)
+                verdict = await clf_instance.classify(event)
+                event["verdict"] = verdict
+                if verdict.get("malicious") is True:
+                    return result(JSONResponse({"error": "blocked by classifier"}, status_code=403), "classifier", True)
+                if verdict.get("error") and policy.inline_failure == "reject":
+                    return result(JSONResponse({"error": "classifier unavailable"}, status_code=503), "classifier_unavailable", True)
 
-    # 2. WAF rules (virtual patch)
-    for rx, desc in rules:
-        if rx.search(probe):
-            store.append_jsonl(store.EVENTS_FILE,
-                               _event(ip, request.method, path, qs, body, 403, True, desc))
-            return JSONResponse({"error": "blocked", "reason": f"WAF rule: {desc}"},
-                                status_code=403)
+        target = honeypot_url if divert else os.getenv("DVWA_URL", "http://dvwa:80")
+        headers = [(k, v) for k, v in request.headers.items() if k.lower() not in HOP and k.lower() not in {"cookie", "x-forwarded-for", "authorization"}]
+        # Do not forward management credentials or untrusted attribution.
+        headers.extend([("accept-encoding", "identity"), ("x-forwarded-for", ip)])
+        cookie = request.headers.get("cookie", "")
+        if st.get("enforced_security") and not divert:
+            cookie = _enforce_security_cookie(cookie, st["enforced_security"])
+        headers.append(("cookie", cookie))  # explicit even if empty: no shared client-cookie leakage
+        try:
+            url = httpx.URL(target).copy_with(path="/" + path, query=raw_query)
+            http = getattr(app.state, "http", http_client)
+            async with http.stream(request.method, url, headers=headers, content=bytes(body)) as up:
+                content = bytearray()
+                async for chunk in up.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > policy.response_limit:
+                        raise ValueError("upstream response too large")
+                response = Response(bytes(content), status_code=up.status_code)
+                # Preserve multiple Set-Cookie headers instead of collapsing into a dict.
+                response.raw_headers.extend([(k, v) for k, v in up.headers.raw if k.decode().lower() not in HOP])
+        except (httpx.HTTPError, ValueError):
+            response = JSONResponse({"error": "upstream unavailable or response too large"}, status_code=502)
+        return result(response, "diverted" if divert else None)
 
-    # 3. forward to DVWA
-    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
-    fwd_headers["accept-encoding"] = "identity"  # no compression: keeps responses
-    #                                              plaintext for logging/inspection
-    level = st.get("enforced_security")          # set by patch_vuln on a confirmed raise
-    if level:  # pin the server security posture; ignore the client's `security` cookie
-        fwd_headers["cookie"] = _enforce_security_cookie(fwd_headers.get("cookie"), level)
-    try:
-        up = await client.request(request.method, "/" + path,
-                                  params=dict(request.query_params),
-                                  content=body, headers=fwd_headers)
-    except httpx.HTTPError as e:
-        store.append_jsonl(store.EVENTS_FILE,
-                           _event(ip, request.method, path, qs, body, 502, False, None))
-        return JSONResponse({"error": "upstream", "detail": str(e)}, status_code=502)
+    return app
 
-    store.append_jsonl(store.EVENTS_FILE,
-                       _event(ip, request.method, path, qs, body, up.status_code, False, None))
-    resp_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP}
-    return Response(content=up.content, status_code=up.status_code, headers=resp_headers)
+
+app = create_app()

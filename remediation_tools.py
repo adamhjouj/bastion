@@ -26,7 +26,7 @@ import re
 import httpx
 
 import store
-from bootstrap_dvwa import _token  # reuse the anti-CSRF token scraper
+from bootstrap_dvwa import _token  # CSRF token scraper only; no DB reset
 
 LEVELS = ("low", "medium", "high", "impossible")
 DVWA_URL = os.environ.get("DVWA_URL", "http://localhost:80")
@@ -34,13 +34,9 @@ _CUR_RE = re.compile(r"currently.*?\b(low|medium|high|impossible)\b", re.I)
 
 
 def _login(base, user="admin", password="password"):
-    """Logged-in DVWA client. Assumes the DB already exists (bootstrap ran);
-    unlike bootstrap_dvwa.authed_session it does NOT reset the database."""
-    c = httpx.Client(base_url=base, follow_redirects=True, timeout=20)
-    r = c.get("/login.php")
-    c.post("/login.php", data={"username": user, "password": password,
-                               "Login": "Login", "user_token": _token(r.text)})
-    return c
+    """Logged-in DVWA client. Never resets the database."""
+    from bootstrap_dvwa import authed_session
+    return authed_session(base, user=user, password=password)
 
 
 def _read_level(html):
@@ -86,7 +82,7 @@ def patch_vuln(level="impossible", base_url=None):
         new = _read_level(c.get("/security.php").text)
         c.close()
     except Exception as e:
-        return {"ok": False, "requested": level, "error": str(e)}
+        return {"ok": False, "requested": level, "error": type(e).__name__}
     ok = new == level
     if ok:
         # Record the enforced level so the proxy pins it (closes the cookie bypass).
@@ -94,8 +90,9 @@ def patch_vuln(level="impossible", base_url=None):
             with store.state_lock:  # swarm-safe read-modify-write
                 store.save_state(_apply_enforcement(store.load_state(), level))
         except Exception:
-            pass  # enforcement is best-effort; the raise itself already succeeded
-    return {"ok": ok, "level": new, "requested": level, "verified": new is not None}
+            return {"ok": False, "requested": level, "level": new, "verified": True,
+                    "error": "app session changed but proxy enforcement persistence failed; retry required"}
+    return {"ok": ok, "level": new, "requested": level, "verified": ok}
 
 
 def do_patch_vuln(level="impossible", **_):
@@ -103,8 +100,8 @@ def do_patch_vuln(level="impossible", **_):
     r = patch_vuln(level)
     if not r["ok"]:
         if r.get("error"):
-            return f"patch_vuln failed: {r['error']}"
-        return (f"patch_vuln unconfirmed: could not verify DVWA security is now "
+            return f"ERROR: patch_vuln failed: {r['error']}"
+        return (f"ERROR: patch_vuln unconfirmed: could not verify DVWA security is now "
                 f"'{r['requested']}' (read back {r.get('level')!r}) — retry or check manually.")
     return (f"DVWA security level raised to '{r['level']}' — the vulnerable module now "
             f"serves its safe/parameterized code path, and enforced_security='{r['level']}' "

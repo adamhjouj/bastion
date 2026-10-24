@@ -184,15 +184,15 @@
   <div class="stat blk"><b id="s-blk">0</b><span>blocked</span></div>
   <div class="stat atk"><b id="s-atk">0</b><span>incidents</span></div>
   <div class="stat ban"><b id="s-ban">0</b><span>IPs banned</span></div>
-  <div class="stat waf"><b id="s-waf">0</b><span>WAF rules</span></div>
+  <div class="stat"><b id="s-divert">0</b><span>IPs diverted</span></div>
   <div class="stat mttr"><b id="s-mttr">-</b><span>response time</span></div>
 </div>
 
 <div class="funnel" id="funnel">
   <div class="fstage f0"><div class="fn" id="fn0">0</div><div class="fl">Requests</div><div class="bar"><i id="fb0"></i></div></div>
-  <div class="fstage f1"><div class="fn" id="fn1">0</div><div class="fl">Regex pre-gate</div><div class="bar"><i id="fb1"></i></div></div>
+  <div class="fstage f1"><div class="fn" id="fn1">0</div><div class="fl">Evaluated requests</div><div class="bar"><i id="fb1"></i></div></div>
   <div class="fstage f2"><div class="fn" id="fn2">0</div><div class="fl">Jev malicious</div><div class="bar"><i id="fb2"></i></div></div>
-  <div class="fstage f3"><div class="fn" id="fn3">0</div><div class="fl">Confirmed &amp; acted</div><div class="bar"><i id="fb3"></i></div></div>
+  <div class="fstage f3"><div class="fn" id="fn3">0</div><div class="fl">Escalated</div><div class="bar"><i id="fb3"></i></div></div>
   <div class="fstage f4"><div class="fn" id="fn4">0</div><div class="fl">Actions taken</div><div class="bar"><i id="fb4"></i></div></div>
 </div>
 
@@ -286,7 +286,7 @@ function renderStats(d){
   setStat("s-blk", ev.filter(e=>e.blocked).length);
   setStat("s-atk", (d.incidents||[]).length);
   setStat("s-ban", (d.denylist||[]).length);
-  setStat("s-waf", (d.rules||[]).length);
+  setStat("s-divert", (d.honeypot||[]).length);
   setStat("s-mttr", responseTime(d));
 }
 
@@ -358,10 +358,11 @@ function renderIncidents(d){
 }
 
 function renderDefenses(d){
-  const bans=(d.denylist||[]), rules=(d.rules||[]);
-  $("def-n").textContent=(bans.length+rules.length)||"";
+  const bans=(d.denylist||[]), diverts=(d.honeypot||[]);
+  $("def-n").textContent=(bans.length+diverts.length+(d.enforced_security?1:0))||"";
   const html=bans.map(b=>`<div class="item"><span class="iico ban-ic">${IC_BAN}</span><span class="ip">${esc(b.ip)}</span> <span class="why">${esc(b.reason)}</span></div>`).join("")
-    + rules.map(r=>`<div class="item"><span class="iico rule-ic">${IC_RULE}</span><span class="rx">/${esc(clip(r.pattern,80))}/</span> <span class="why">${esc(r.description)}</span></div>`).join("");
+    + diverts.map(b=>`<div class="item"><span>DIVERT</span><span class="ip">${esc(b.ip)}</span><span class="why">${esc(b.reason)}</span></div>`).join("")
+    + (d.enforced_security?`<div class="item">App security: ${esc(d.enforced_security)}</div>`:"");
   $("def").innerHTML = html || '<div class="empty">no defenses deployed</div>';
 }
 
@@ -375,7 +376,7 @@ function renderActions(d){
       const j=x.jev;
       const sc = j && j.malicious_score!=null ? (typeof j.malicious_score==="number"? j.malicious_score.toFixed(2): j.malicious_score) : "";
       const verdict = j ? (j.malicious?`<span style="color:var(--red)">malicious ${esc(sc)}</span> ${esc(j.attack_type||"")}`:`<span class="ok">benign</span>`)
-                        : `<span class="adim">regex-only</span>`;
+                        : `<span class="adim">no Jev verdict</span>`;
       const arrowMap = {autoblock:["var(--red)","auto-block"], claude:["var(--amber)","Claude"],
                         benign:["var(--faint)","dropped"], jev_error:["var(--amber)","Claude (jev err)"],
                         no_engine:["var(--faint)","no engine"]};
@@ -383,12 +384,11 @@ function renderActions(d){
       const arrow = `<span style="color:${ac}">→ ${al}</span>`;
       return `<div class="act"><span class="abadge ab-jev">JEV</span><span class="atxt"><span class="adim">${esc(x.ip)}</span> ${esc(clip(x.path||"",28))} ${verdict} ${arrow}</span></div>`;
     }
-    const map={blacklist_ip:["ab-ban","BAN"],add_waf_rule:["ab-waf","WAF"],raise_alert:["ab-alert","ALERT"]};
+    const map={blacklist_ip:["ab-ban","BAN"],raise_alert:["ab-alert","ALERT"]};
     const [cls,lbl]=map[x.tool]||["ab-alert",(x.tool||"TOOL").toUpperCase()];
     const i=x.input||{};
     let detail="";
     if(x.tool==="blacklist_ip") detail=`${esc(i.ip||"")} <span class="adim">${esc(clip(i.reason||"",40))}</span>`;
-    else if(x.tool==="add_waf_rule") detail=`<span class="rx">/${esc(clip(i.pattern||"",46))}/</span> <span class="adim">${esc(clip(i.description||"",30))}</span>`;
     else if(x.tool==="raise_alert") detail=`<span class="sev ${esc(i.severity||"")}">${esc(i.severity||"")}</span> ${esc(i.attack_type||"")} <span class="adim">${esc(i.source_ip||"")}</span>`;
     else detail=esc(clip(JSON.stringify(i),60));
     return `<div class="act"><span class="abadge ${cls}">${esc(lbl)}</span><span class="atxt">${detail}</span></div>`;

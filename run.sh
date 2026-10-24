@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
-# Build + run the entire stack in Docker: DVWA + MailHog + reverse-proxy/WAF +
-# blue-team agent. The proxy container waits for DVWA, bootstraps it, then serves.
+# Build and start the full stack. State persists across restarts.
 set -euo pipefail
 cd "$(dirname "$0")"
-[ -f .env ] || { echo "Missing .env — run: cp .env.example .env  and add TYPESAFE_API_KEY"; exit 1; }
 
-echo "[*] building + starting stack (DVWA + MailHog + proxy + blue agent) ..."
+if [ ! -f .env ]; then
+    echo "ERROR: .env not found. Copy .env.example and fill in required values."
+    exit 1
+fi
+
+# Fail early if required secrets are missing.
+check_token() {
+    local var="$1"
+    local val
+    val="$(grep -E "^${var}=" .env | cut -d= -f2- | tr -d ' \r')" || true
+    if [ -z "$val" ] || [ "$val" = "..." ] || [ "$val" = "changeme" ]; then
+        echo "ERROR: ${var} must be set in .env (current value looks like a placeholder)"
+        exit 1
+    fi
+}
+check_token MANAGEMENT_TOKEN
+check_token ACTUATOR_TOKEN
+
+echo "[*] building and starting bastion stack ..."
 docker compose up --build -d
 
 cat <<EOF
 
-=== Bastion up (dockerized) ===
-  Dashboard : http://localhost:8080/__dashboard
-  MailHog   : http://localhost:8025
-  App (proxied): http://localhost:8080/
+=== Bastion up ===
+  Dashboard: http://localhost:8080/__dashboard
+    Token:   set MANAGEMENT_TOKEN in your browser's Basic Auth or Authorization header
+  App:       http://localhost:8080/
+  MailHog:   http://localhost:8025
 
-  Attack it (pure-Jev, no Anthropic key needed):
-    curl -H 'X-Forwarded-For: 10.13.37.7' \\
-      "http://localhost:8080/vulnerabilities/sqli/?id=1'+OR+'1'='1&Submit=Submit"
-    # then re-run the same curl -> 403 (Jev banned the IP + added a WAF rule)
+  Mode: $(grep -E '^BASTION_MODE=' .env | cut -d= -f2 || echo observe)
+  Logs: docker compose logs -f proxy blue
+  Stop: docker compose down
 
-  With ANTHROPIC_API_KEY in .env, the autonomous red agent works too:
-    .venv/bin/python red_agent.py sqli
-
-  Logs : docker compose logs -f proxy blue
-  Stop : docker compose down
+  To initialize the DVWA database (first run or explicit reset):
+    docker compose exec proxy python bootstrap_dvwa.py \$DVWA_URL --reset-confirm RESET-DVWA
 EOF
