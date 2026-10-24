@@ -59,7 +59,8 @@ Bastion is a 24/7 blue-team agent that embeds alongside your services (a server,
 It ships with a live dashboard and a self-contained demo: a bundled vulnerable sample app plus a scoped autonomous red-team agent, so you can watch the full detect-and-respond loop end to end on your machine before pointing Bastion at your real services. The demo target is deliberately vulnerable, so keep it local and never expose it publicly.
 
 Key capabilities:
-* **Real-time detection**: a reverse proxy tails every request; a cheap regex pre-filter gates what reaches the model, so Claude only classifies traffic that looks suspicious
+* **Real-time detection**: a reverse proxy tails every request through a tiered triage pipeline (cheap regex pre-gate, then a fast system-1 classifier), so only confirmed-malicious traffic ever reaches the expensive reasoning model
+* **Tiered triage**: a regex pre-gate runs for free on all traffic, a system-1 classifier (TypeSafe Jev) scores what survives as malicious/benign plus attack type, and only confirmed attacks escalate to Claude with that verdict as context; it fails safe and falls back to regex-only when no classifier key is set
 * **Automatic damage control**: on a confirmed attack the blue agent blocks the source IP, adds a virtual-patch WAF rule, and emails a structured incident report, no human in the loop
 * **Proxy as enforcement point**: the same reverse proxy that produces the logs also enforces the denylist and WAF rules, so re-running an attack returns `403` live
 * **Scoped red-team agent**: a bundled autonomous attacker exercises common web attacks (SQL injection, command injection) so you can watch the defense respond end to end
@@ -69,14 +70,16 @@ Key capabilities:
 
 ### How It Works
 
-A reverse proxy sits in front of the app you want to protect and is both the log source and the enforcement point. The blue agent tails its log, a regex pre-filter gates what reaches Claude, then Claude classifies the request and calls tools to block, patch, and alert. Re-running the same attack then returns `403` live.
+A reverse proxy sits in front of the app you want to protect and is both the log source and the enforcement point. The blue agent tails its log through a three-stage triage: a cheap regex pre-gate drops obvious benign traffic, a fast system-1 classifier (TypeSafe Jev) scores the rest as malicious or benign, and only confirmed attacks reach Claude, which reasons over them and calls tools to block, patch, and alert. Re-running the same attack then returns `403` live.
 
 ```
 red_agent -> proxy :8080 -> your app :80
                  | logs + enforces (denylist + WAF)
                  v
-           blue_agent -> Claude -> blacklist / WAF rule / email
-                 |
+           blue_agent: regex pre-gate -> Jev (system-1) -> Claude (system-2)
+                 |                                              |
+                 |                          blacklist / WAF rule / email
+                 v
            dashboard (/__dashboard)
 ```
 
@@ -86,6 +89,7 @@ red_agent -> proxy :8080 -> your app :80
 
 * [![Python][Python-badge]][Python-url]
 * [![Anthropic][Anthropic-badge]][Anthropic-url]
+* [![TypeSafe Jev][Jev-badge]][Jev-url]
 * [![FastAPI][FastAPI-badge]][FastAPI-url]
 * [![Uvicorn][Uvicorn-badge]][Uvicorn-url]
 * [![Docker][Docker-badge]][Docker-url]
@@ -100,6 +104,7 @@ red_agent -> proxy :8080 -> your app :80
 * Python 3.10+
 * Docker and Docker Compose (for the bundled demo target and MailHog)
 * An Anthropic API key
+* Optional: a TypeSafe API key to enable the system-1 classifier tier (without it the agent falls back to the regex pre-gate alone)
 
 ### Installation
 
@@ -114,8 +119,10 @@ red_agent -> proxy :8080 -> your app :80
    cp .env.example .env
    ```
 
-   Only `ANTHROPIC_API_KEY` is required for the demo. The email defaults target
-   MailHog (no auth) so the demo never flakes:
+   Only `ANTHROPIC_API_KEY` is required for the demo. `TYPESAFE_API_KEY` is
+   optional and turns on the system-1 classifier tier; leave it blank to run on
+   the regex pre-gate alone. The email defaults target MailHog (no auth) so the
+   demo never flakes:
    ```env
    ANTHROPIC_API_KEY=sk-ant-...
    DVWA_URL=http://localhost:80
@@ -125,6 +132,10 @@ red_agent -> proxy :8080 -> your app :80
    SMTP_HOST=localhost
    SMTP_PORT=1025
    ALERT_TO=soc@yourteam.com
+
+   # Optional system-1 classifier (TypeSafe Jev); regex-only fallback if unset
+   TYPESAFE_API_KEY=
+   MALICIOUS_THRESHOLD=0.5
    ```
 
 3. Create a virtual environment and install dependencies
@@ -169,6 +180,14 @@ an email into MailHog. Re-run the same attack and the proxy now returns `403`:
 same exploit, now dead. Running the command-injection case proves it defends more
 than one attack class.
 
+**Smoke-test the classifier**
+
+With a `TYPESAFE_API_KEY` set, you can run the system-1 classifier on its own
+against a built-in malicious and benign sample:
+```sh
+.venv/bin/python classifier.py
+```
+
 **Manual test (no agents)**
 
 You can exercise the pipeline directly with curl. Send a benign request (200),
@@ -193,7 +212,8 @@ their upgrade paths. See `architecture.md` for the full design.
 
 - [x] Reverse proxy that is both log source and enforcement point (denylist + WAF)
 - [x] Blue-team agent: real-time detect, IP blacklist, virtual patch, email incident report
-- [x] Regex pre-filter to gate what reaches the model and keep cost predictable
+- [x] Tiered triage: regex pre-gate, then a system-1 classifier (TypeSafe Jev), so only confirmed attacks reach Claude and cost stays predictable
+- [x] Graceful fallback to regex-only triage when no classifier key is set
 - [x] Live dashboard at `/__dashboard`
 - [x] Scoped autonomous red-team agent (SQL injection, command injection)
 - [ ] Broader attack coverage (XSS, path traversal, file upload)
@@ -241,6 +261,8 @@ Project Link: [https://github.com/adamhjouj/bastion](https://github.com/adamhjou
 [Python-url]: https://www.python.org/
 [Anthropic-badge]: https://img.shields.io/badge/Anthropic-191919?style=for-the-badge&logo=anthropic&logoColor=white
 [Anthropic-url]: https://www.anthropic.com/
+[Jev-badge]: https://img.shields.io/badge/TypeSafe_Jev-4B2ECC?style=for-the-badge&logoColor=white
+[Jev-url]: https://typesafe.ai/
 [FastAPI-badge]: https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white
 [FastAPI-url]: https://fastapi.tiangolo.com/
 [Uvicorn-badge]: https://img.shields.io/badge/Uvicorn-2094F3?style=for-the-badge&logo=gunicorn&logoColor=white
