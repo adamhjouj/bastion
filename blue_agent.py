@@ -20,6 +20,11 @@ try:  # eradication tools live in a sibling module; keep the agent runnable with
 except Exception:
     REMEDIATION_REGISTER = None
 
+try:  # control-plane actions (kill_session/egress/quarantine); LLM stays unprivileged — see actuator.py
+    from actuator import REGISTER as CONTROL_REGISTER
+except Exception:
+    CONTROL_REGISTER = None
+
 MODEL = os.environ.get("BLUE_MODEL", "claude-sonnet-5")
 POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
@@ -144,6 +149,17 @@ if REMEDIATION_REGISTER:
                  else [REMEDIATION_REGISTER]):
         TOOLS.append(_reg["schema"])
         DISPATCH[_reg["name"]] = _reg["fn"]
+
+# Control-plane actions, folded in via the same {name,schema,fn} hook, with
+# dedupe so we never register a tool name the remediation module already took.
+if CONTROL_REGISTER:
+    _have = {t["name"] for t in TOOLS}
+    for _reg in CONTROL_REGISTER:
+        if _reg["name"] in _have:
+            continue
+        TOOLS.append(_reg["schema"])
+        DISPATCH[_reg["name"]] = _reg["fn"]
+        _have.add(_reg["name"])
 
 
 def autoblock(event, verdict):

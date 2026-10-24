@@ -24,7 +24,12 @@ services:
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
       DVWA_URL: http://dvwa:80  # patch_vuln (remediation) talks directly to DVWA
-    volumes: ["bastion-data:/app/data"]
+    # actuator.py reaches Docker (kill_session/egress/quarantine) via this socket.
+    # ponytail: docker.sock == host root; fine on a local demo box, split into an
+    # actuator sidecar if this leaves the demo so the LLM container holds no socket.
+    volumes:
+      - "bastion-data:/app/data"
+      - "/var/run/docker.sock:/var/run/docker.sock"
     depends_on: [proxy, mailhog]
     restart: unless-stopped
 volumes:
