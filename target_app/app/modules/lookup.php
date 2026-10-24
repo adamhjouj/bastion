@@ -16,18 +16,23 @@ function handle_lookup() {
     $result = '';
     if (isset($_REQUEST[$param])) {
         $id = $_REQUEST[$param];
-        if (cfg('level') === 'low') {
-            // raw concatenation inside quotes
-            $sql = sprintf("SELECT %s, %s FROM %s WHERE %s = '%s'",
-                cfg('c_a'), cfg('c_b'), cfg('tbl'), cfg('c_id'), $id);
-        } else {
-            // medium: escape quotes, but numeric (unquoted) context -> still injectable
-            $id = addslashes($id);
-            $sql = sprintf("SELECT %s, %s FROM %s WHERE %s = %s",
-                cfg('c_a'), cfg('c_b'), cfg('tbl'), cfg('c_id'), $id);
-        }
         try {
-            $stmt = db()->query($sql);
+            if (cfg('level') === 'low') {
+                // raw concatenation inside quotes
+                $stmt = db()->query(sprintf("SELECT %s, %s FROM %s WHERE %s = '%s'",
+                    cfg('c_a'), cfg('c_b'), cfg('tbl'), cfg('c_id'), $id));
+            } elseif (cfg('level') === 'medium') {
+                // medium: escape quotes, but numeric (unquoted) context -> still injectable
+                $id = addslashes($id);
+                $stmt = db()->query(sprintf("SELECT %s, %s FROM %s WHERE %s = %s",
+                    cfg('c_a'), cfg('c_b'), cfg('tbl'), cfg('c_id'), $id));
+            } else {
+                // patched (high/impossible): bound parameter -> injection neutralized.
+                // Set by the blue-team patch_vuln remediation; not used in the red eval path.
+                $stmt = db()->prepare(sprintf("SELECT %s, %s FROM %s WHERE %s = ?",
+                    cfg('c_a'), cfg('c_b'), cfg('tbl'), cfg('c_id')));
+                $stmt->execute([$id]);
+            }
             $out = [];
             foreach ($stmt->fetchAll(PDO::FETCH_NUM) as $row) {
                 $out[] = e(cfg('label_a')) . ': ' . e($row[0]) .

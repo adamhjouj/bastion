@@ -149,12 +149,25 @@ def list_processes(target):
     return "processes in {}:\n{}".format(target, "\n".join(lines) or "(none)")
 
 
+def _session_dir(cid):
+    """Where THIS PHP app actually writes session files. DVWA used a Debian php.ini
+    default of /var/lib/php/sessions; the de-fingerprinted fork runs php:8.2-apache,
+    which leaves session.save_path empty -> PHP falls back to sys_get_temp_dir()
+    (/tmp). Ask the app's own PHP rather than assuming the old path."""
+    rc, out, _ = _docker("exec", cid, "php", "-r",
+                         "echo ini_get('session.save_path') ?: sys_get_temp_dir();")
+    path = (out or "").strip()
+    if ";" in path:                      # "N;/path" or "N;MODE;/path"
+        path = path.rsplit(";", 1)[-1]
+    return path or SESS_DIR
+
+
 def list_sessions(target):
     cid = _resolve(target)
-    rc, out, err = _docker("exec", cid, "sh", "-c", f"ls -1 {SESS_DIR} 2>/dev/null")
-    if rc != 0:
-        raise Rejected(f"could not list sessions: {err.strip() or rc}")
-    ids = [ln[5:] for ln in out.split() if ln.startswith("sess_")]
+    sdir = _session_dir(cid)
+    rc, out, _ = _docker("exec", cid, "sh", "-c", f"ls -1 {sdir} 2>/dev/null")
+    # A missing/empty session dir is "no sessions", not a tool failure.
+    ids = [ln[5:] for ln in out.split() if ln.startswith("sess_")] if rc == 0 else []
     return "active sessions in {}: {}".format(target, ", ".join(ids) or "(none)")
 
 
@@ -171,14 +184,19 @@ def kill_process(target, pid, start_time):
     executable = cmd.split()[0].rsplit("/", 1)[-1] if cmd else ""
     if not executable or executable in {"apache2", "httpd", "mysqld", "mariadbd", "php-fpm", "init", "supervisord"}:
         raise Rejected("protected service process")
-    # Linux pidfd pins the process before identity verification, avoiding check/kill PID reuse.
-    # If target lacks modern Python/pidfd support, refuse rather than fall back to unsafe kill.
-    helper = ("import os,signal,sys; p=int(sys.argv[1]); fd=os.pidfd_open(p); "
-              "s=open('/proc/%d/stat'%p).read().rsplit(')',1)[1].split()[19]; "
-              "assert s==sys.argv[2], 'stale identity'; signal.pidfd_send_signal(fd,signal.SIGKILL)")
-    rc, _, _ = _docker("exec", cid, "python3", "-c", helper, str(pid), str(start_time))
+    # Re-read /proc/<pid>/stat and re-check the start_time in the SAME shell step that
+    # kills, so the identity can't change between check and kill. The de-fingerprinted
+    # target is php:8.2-apache and ships no python3, so the old pidfd helper always
+    # errored here; the kill verb below uses only POSIX sh + the kill builtin.
+    # ponytail: no pidfd => a sub-millisecond PID-reuse race remains between the
+    # start_time check and kill; acceptable for this target. Upgrade: install python3
+    # with os.pidfd_open in the image if the race ever matters.
+    guard = ('p="$1"; want="$2"; s=$(cat /proc/"$p"/stat 2>/dev/null) || exit 3; '
+             'rest=${s##*) }; set -- $rest; [ "${20}" = "$want" ] || exit 4; '
+             'kill -9 "$p"')
+    rc, _, _ = _docker("exec", cid, "sh", "-c", guard, "sh", str(pid), str(start_time))
     if rc:
-        raise Rejected("safe kill unavailable or identity changed; target needs Python with pidfd support")
+        raise Rejected("safe kill failed: identity changed or process already gone")
     return f"killed verified candidate pid {pid} in {target}"
 
 
@@ -186,7 +204,8 @@ def kill_session(target, session_id):
     cid = _resolve(target)
     if not _SESSION_ID.fullmatch(str(session_id)):
         raise Rejected(f"invalid session id {session_id!r}")
-    rc, _, err = _docker("exec", cid, "rm", "-f", f"{SESS_DIR}/sess_{session_id}")
+    sdir = _session_dir(cid)
+    rc, _, err = _docker("exec", cid, "rm", "-f", f"{sdir}/sess_{session_id}")
     if rc != 0:
         raise Rejected(f"could not remove session: {err.strip() or rc}")
     return f"invalidated session {session_id} in {target} (attacker force-logged-out)"
@@ -316,7 +335,7 @@ CONTROL_TOOLS = [
     {"name": "kill_process", "description":
      "Kill ONE attacker-spawned process (e.g. a reverse shell from RCE). Only a "
      "live, non-baseline identity can be killed; system processes are refused. "
-     "Requires operator policy and Linux pidfd support in the target.",
+     "Identity (start_time) is re-verified at kill time. Requires operator policy.",
      "input_schema": {"type": "object", "properties": {
          "target": _T["properties"]["target"],
          "pid": {"type": "integer", "description": "confirmed malicious candidate PID"},
