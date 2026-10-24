@@ -1,4 +1,4 @@
-import { getJSON, subscribe } from './api.js';
+import { getJSON, postJSON, subscribe } from './api.js';
 import { mergeById, validateOverview } from './state.js';
 import { $, node, renderOverview, renderDetail, renderLogs } from './render.js';
 
@@ -34,6 +34,19 @@ async function openIncident(id, refresh = false) {
 }
 $('close-detail').onclick = () => $('incident-detail').close();
 $('incident-detail').addEventListener('close', () => { activeIncident = null; detailVersion++; });
+
+$('btn-toggle-destructive').onclick = async () => {
+  const current = $('policy-destructive').textContent === 'Enabled';
+  const btn = $('btn-toggle-destructive');
+  btn.disabled = true;
+  try {
+    await postJSON('/defenses/policy', { allow_destructive: !current });
+  } catch (e) {
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.textContent = current ? 'Disable' : 'Enable'; btn.disabled = false; }, 3000);
+  }
+  btn.disabled = false;
+};
 
 const stopOverview = subscribe({
   stream: '/stream', event: 'snapshot', poll: '/overview', onState: overviewConnection,

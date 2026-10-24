@@ -77,15 +77,41 @@ def do_inspect_target(path, method="GET", query="", body=""):
                        "note": "Recorded redacted data; no heuristic threat verdict."})
 
 
+_ALERT_WINDOW = int(os.getenv("ALERT_DEDUP_MINUTES", "30"))
+
+
+def _recent_incident_exists(source_ip, attack_type):
+    """True if an incident for this source+type was recorded within the dedup window."""
+    cutoff = store.now_plus(-_ALERT_WINDOW * 60)
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT 1 FROM records WHERE kind='incidents' "
+            "AND json_extract(data,'$.source_ip')=? "
+            "AND json_extract(data,'$.attack_type')=? "
+            "AND ts>=? LIMIT 1",
+            (source_ip, attack_type, cutoff)).fetchone()
+    return row is not None
+
+
 def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
+    # Suppress duplicate alerts for the same source and attack class within the window.
+    if _recent_incident_exists(source_ip, attack_type):
+        return (f"Incident already recorded for {source_ip} ({attack_type}) within the last "
+                f"{_ALERT_WINDOW} minutes. No duplicate email queued. Update the existing "
+                f"incident summary if the situation has changed.")
     case_id = getattr(_CONTEXT, "case_id", "manual")
     incident = redact({"ts": store.now(), "case_id": case_id, "severity": severity,
                        "attack_type": attack_type, "source_ip": source_ip,
                        "evidence": evidence[:2000], "summary": summary[:2000]})
-    # Persist the incident and its notification atomically; idempotency is owned by execute_tool.
-    with store.state_lock:
-        store.append_jsonl(store.INCIDENTS_FILE, incident)
-        store.queue_mail(hashlib.sha256(json.dumps(incident, sort_keys=True).encode()).hexdigest(), incident)
+    # Persist incident and outbox entry atomically.
+    with store.connection(write=True) as db:
+        db.execute("INSERT INTO records(kind,ts,data,status,case_id) VALUES('incidents',?,?,'done',?)",
+                   (incident["ts"], json.dumps(incident), case_id))
+        key = hashlib.sha256(json.dumps(incident, sort_keys=True).encode()).hexdigest()
+        from notifications import prepare_message
+        item = dict(incident)
+        item["_mail"] = prepare_message(item)
+        db.execute("INSERT OR IGNORE INTO outbox(key,data) VALUES(?,?)", (key, json.dumps(item)))
     return "Incident recorded; email queued (not yet delivered)"
 
 
@@ -143,8 +169,10 @@ def execute_tool(name, params, case_id):
         if name not in DISPATCH:
             raise ValueError("unknown tool")
         validate(params, SCHEMAS[name])
-        if name in DESTRUCTIVE and not Settings.from_env().allow_destructive:
-            result = "REJECTED: deployment policy requires operator approval"
+        # allow_destructive: env setting OR runtime state override (set from dashboard).
+        allow = Settings.from_env().allow_destructive or bool(store.get_policy("allow_destructive"))
+        if name in DESTRUCTIVE and not allow:
+            result = "REJECTED: deployment policy requires operator approval (set ALLOW_DESTRUCTIVE=1 or approve from dashboard)"
             record_action(name, params, result, "rejected", case_id)
             return result
     except Exception:

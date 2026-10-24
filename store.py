@@ -162,6 +162,22 @@ def save_state(state):
                    (json.dumps(state),))
 
 
+def get_policy(key, default=None):
+    """Read a runtime policy value from state (e.g. allow_destructive override)."""
+    with connection() as db:
+        row = db.execute("SELECT data FROM state WHERE id=1").fetchone()
+        return json.loads(row[0]).get(key, default) if row else default
+
+
+def set_policy(key, value):
+    """Persist a runtime policy override in shared state; agents pick it up immediately."""
+    with state_lock:
+        st = load_state()
+        st[key] = value
+        save_state(st)
+    set_health("policy", {key: value, "updated": now()})
+
+
 def append_jsonl(path, obj):
     """Compatibility name; append a structured record transactionally, not a file."""
     item = redact(obj)

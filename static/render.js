@@ -1,4 +1,26 @@
 import { actionStatus, componentStatus, verdictLabel } from './state.js';
+import { postJSON } from './api.js';
+
+async function mutate(path, body, successMsg) {
+  try {
+    await postJSON(path, body);
+    return successMsg || 'Done';
+  } catch (error) {
+    return `Failed (${error.status}): ${JSON.stringify(error.detail || error.message || '')}`;
+  }
+}
+
+function actionButton(label, className, onClick) {
+  const btn = node('button', label);
+  btn.type = 'button'; btn.className = 'action-btn ' + (className || '');
+  btn.onclick = async event => {
+    btn.disabled = true; btn.textContent = '…';
+    const result = await onClick();
+    btn.textContent = result; btn.className = 'action-btn result';
+    setTimeout(() => { btn.textContent = label; btn.className = 'action-btn ' + (className || ''); btn.disabled = false; }, 3000);
+  };
+  return btn;
+}
 
 export const $ = id => document.getElementById(id);
 export function node(tag, text, className) {
@@ -49,6 +71,15 @@ export function renderOverview(data, openIncident) {
       node('span', event.status == null ? 'in flight' : event.matched || (event.blocked ? 'stopped' : 'forwarded'), 'muted'));
     return row;
   }, 'No request traffic yet');
+  // Operator controls panel
+  const allow = data.allow_destructive;
+  $('policy-destructive').textContent = allow ? 'Enabled' : 'Disabled';
+  $('policy-destructive').className = allow ? 'good' : 'warn';
+  $('btn-toggle-destructive').textContent = allow ? 'Disable' : 'Enable';
+  $('btn-test-email').onclick = $('btn-test-email').onclick || (async () => {
+    const result = await mutate('/notifications/test', null, 'Sent');
+    $('btn-test-email').textContent = result; setTimeout(() => ($('btn-test-email').textContent = 'Test email'), 3000);
+  });
   text('incident-count', `${data.incidents.length} shown`);
   reconcile('incidents', data.incidents, incident => {
     const row = node('div', null, 'row'), body = node('div', null, 'grow');
@@ -59,15 +90,19 @@ export function renderOverview(data, openIncident) {
     row.append(badge(incident.severity || 'unknown', tone), body, button); return row;
   }, 'No incidents recorded');
   const defenses = [
-    ...data.denylist.map((item, index) => ({ ...item, id: `ban-${index}`, type: 'BAN', detail: item.expires ? `Expires ${item.expires}` : 'Permanent' })),
-    ...data.honeypot.map((item, index) => ({ ...item, id: `divert-${index}`, type: 'DIVERT', detail: 'Routed to decoy' })),
-    ...(data.enforced_security ? [{ id: 'security', type: 'APP', ip: data.enforced_security, detail: 'Enforced security level' }] : [])
+    ...data.denylist.map((item, index) => ({ ...item, id: `ban-${index}`, _type: 'BAN', _detail: item.expires ? `Until ${item.expires}` : 'Permanent' })),
+    ...data.honeypot.map((item, index) => ({ ...item, id: `divert-${index}`, _type: 'DIVERT', _detail: 'Routed to decoy' })),
+    ...(data.enforced_security ? [{ id: 'security', _type: 'APP', ip: data.enforced_security, _detail: 'Enforced security level' }] : [])
   ];
   reconcile('defenses', defenses, item => {
     const row = node('div', null, 'row'), body = node('div', null, 'grow');
-    body.append(node('code', item.ip), node('div', item.reason || item.detail, 'event-description'),
-      node('div', item.detail, 'muted small'));
-    row.append(badge(item.type), body); return row;
+    body.append(node('code', item.ip), node('div', item.reason || item._detail, 'event-description'),
+      node('div', item._detail, 'muted small'));
+    if (item._type === 'BAN') row.append(actionButton('Unban', 'danger-btn',
+      () => mutate('/defenses/unban', { ip: item.ip, reason: 'Operator reversal from dashboard' }, `Unbanned ${item.ip}`)));
+    if (item._type === 'DIVERT') row.append(actionButton('Release', 'warn-btn',
+      () => mutate('/defenses/undivert', { ip: item.ip, reason: 'Operator release from dashboard' }, `Released ${item.ip}`)));
+    row.append(badge(item._type), body); return row;
   }, 'No active defenses');
   text('action-count', `${data.actions.length} shown`);
   reconcile('actions', data.actions, action => {
@@ -89,9 +124,13 @@ export function renderOverview(data, openIncident) {
 
 export function renderNotification(item) {
   const row = node('div', null, 'row'), body = node('div', null, 'grow');
+  const statusLine = [item.provider_id && `ID: ${item.provider_id}`, item.error, 'Waiting for the mail worker'].find(Boolean);
   body.append(node('span', `Case ${item.case_id || 'unlinked'} · ${item.attempts} attempt(s)`),
-    node('div', item.error || item.provider_id || 'Waiting for the mail worker', 'event-description'));
-  row.append(badge(item.status, item.status === 'accepted' ? 'good' : item.status === 'dead' ? 'bad' : 'warn'), body);
+    node('div', statusLine, 'event-description'));
+  const tone = item.status === 'accepted' || item.status === 'delivered' ? 'good' : item.status === 'dead' ? 'bad' : 'warn';
+  if (item.status === 'dead') row.append(actionButton('Retry',
+    '', () => postJSON('/notifications/retry', { id: item.id }).then(() => 'Queued').catch(() => 'Failed')));
+  row.append(badge(item.status, tone), body);
   return row;
 }
 

@@ -123,7 +123,9 @@ def snapshot(mode=None):
         events, recent_actions, incidents = latest("events", 200), latest("actions", 200), latest("incidents", 50)
         health = _health(db)
         containment = _latest_containment(db, incidents)
+    allow_destructive = bool(state.get("allow_destructive")) or False
     return {"schema_version": 1, "mode": mode, "metrics_scope": "retained history",
+            "allow_destructive": allow_destructive,
             "events": events, "actions": recent_actions, "incidents": incidents,
             "events_total": counts.get("events", 0), "incidents_total": counts.get("incidents", 0),
             "blocked_total": blocked, "denylist": [d for d in state.get("denylist", []) if store.active_ban(d)],
