@@ -51,7 +51,15 @@
   </div>
   <div class="column">
     <section class="panel incidents"><h2>Incidents <span id="incident-count"></span></h2><div id="incidents" class="scroll"><p class="empty">Loading incidents…</p></div></section>
-    <section class="panel defenses"><h2>Active defenses</h2><div id="defenses" class="scroll"></div></section>
+    <section class="panel defenses">
+      <h2>Active defenses <span class="toolbar" style="margin-left:auto">
+        <span id="policy-destructive" class="badge warn">
+        </span><span class="muted" style="font-size:11px">destructive</span>
+        <button id="btn-toggle-destructive" class="action-btn" type="button"></button>
+        <button id="btn-test-email" class="action-btn" type="button">Test email</button>
+      </span></h2>
+      <div id="defenses" class="scroll"></div>
+    </section>
     <section class="panel actions"><h2>Investigator activity <span id="action-count"></span></h2><div id="actions" class="scroll"></div></section>
     <section class="panel notifications"><h2>Email notifications <span id="mail-count"></span></h2><div id="notifications" class="scroll"></div><p class="hint">Accepted means Resend accepted the request, not confirmed inbox delivery.</p></section>
     <section class="panel outcomes"><h2>Recent request outcomes</h2><div id="outcomes" class="scroll"></div></section>

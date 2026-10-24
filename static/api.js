@@ -10,6 +10,17 @@ export async function getJSON(path, signal) {
   return response.json();
 }
 
+export async function postJSON(path, body) {
+  const response = await fetch(ROOT + path, { method: 'POST', credentials: 'same-origin',
+    cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+    body: body != null ? JSON.stringify(body) : undefined });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw Object.assign(new ApiError(response.status), { detail });
+  }
+  return response.json();
+}
+
 export function subscribe({ stream, event, poll, onData, onState }) {
   let active = true, source = null, retryTimer = null, pollTimer = null;
   let attempts = 0, revision = 0, streaming = false;
