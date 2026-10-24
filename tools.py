@@ -123,7 +123,7 @@ _GROUPS = [
      ["get_defenses", "recent_requests", "recent_incidents", "service_status",
       "inspect_target", "list_processes", "list_sessions"]),
     ("CONTAINMENT (stop/limit the attacker)",
-     ["blacklist_ip", "divert_to_honeypot", "undivert", "isolate_egress",
+     ["blacklist_ip", "bulk_blacklist_ip", "divert_to_honeypot", "undivert", "isolate_egress",
       "quarantine_container", "release_container", "kill_process", "kill_session"]),
     ("ERADICATION / VIRTUAL PATCH (fix or neutralize the hole)",
      ["add_waf_rule", "patch_vuln", "rotate_secret"]),

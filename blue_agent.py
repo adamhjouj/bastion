@@ -61,6 +61,11 @@ USE_AGENT = llm.provider() is not None
 # Swarm: max concurrent defenders (one per distinct attacker IP) per poll. Caps spend/
 # rate under a flood; attackers beyond the cap wait their turn in the pool queue.
 SWARM_MAX = int(os.environ.get("SWARM_MAX", "4"))
+# Botnet tier: at/above this many distinct source IPs in one poll, stop fighting each IP
+# and hand the whole batch to ONE campaign-level SUPERVISOR (commander) — a class-wide WAF
+# rule + bulk ban + one consolidated incident, instead of N per-IP defender loops. Below
+# it, the per-IP swarm handles the handful of distinct attackers.
+SUPERVISOR_MIN = int(os.environ.get("SUPERVISOR_MIN", "8"))
 
 # Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
 CANNED_WAF = {
@@ -138,6 +143,29 @@ SYSTEM = (
     "action already listed in current defenses. Be decisive."
 )
 
+# Botnet / distributed-campaign commander. Used instead of the per-IP doctrine when many
+# source IPs attack at once (see SUPERVISOR_MIN). Fight the CAMPAIGN, not each bot.
+SUPERVISOR_DOCTRINE = (
+    "You are the INCIDENT COMMANDER for a COORDINATED, MULTI-SOURCE attack: many source IPs "
+    "hitting the app at once — a botnet or distributed campaign, likely one shared technique. "
+    "Do NOT fight each IP separately; that doesn't scale and misses the point. Respond at the "
+    "CAMPAIGN level, with a handful of class-wide actions, not hundreds of per-IP ones:\n"
+    "1. PRIMARY WEAPON: one TIGHT class-wide add_waf_rule per distinct technique. A WAF rule "
+    "matches the payload regardless of source IP, so ONE rule blocks the WHOLE botnet at once. "
+    "Match the shared payload tokens (e.g. 'union\\s+select', ';\\s*cat'), never broad patterns "
+    "that would block normal traffic.\n"
+    "2. bulk_blacklist_ip the observed participant IPs in ONE call (a list) as a second layer — "
+    "not blacklist_ip per IP.\n"
+    "3. If the sheer VOLUME threatens availability (not just exploitation), the proxy already "
+    "rate-limits per IP; escalate with isolate_egress or (last resort) quarantine_container on "
+    "the target.\n"
+    "4. patch_vuln if the underlying hole is serious.\n"
+    "5. raise ONE consolidated raise_alert describing the campaign (scale, sources, technique, "
+    "your response) — not one alert per IP.\n"
+    "Orient first with get_defenses so you don't duplicate a rule already in place. Be decisive "
+    "and economical. If a cluster looks benign on inspection, say so and don't act on it."
+)
+
 TOOLS = [
     {"name": "blacklist_ip",
      "description": "Block all current and future requests from this source IP at the proxy.",
@@ -145,6 +173,16 @@ TOOLS = [
                       "properties": {"ip": {"type": "string"},
                                      "reason": {"type": "string"}},
                       "required": ["ip", "reason"]}},
+    {"name": "bulk_blacklist_ip",
+     "description": "Block MANY source IPs at once (botnet / distributed campaign). One call, "
+                    "a list of IPs — far better than calling blacklist_ip per IP. Prefer a "
+                    "class-wide add_waf_rule as the primary weapon; use this to sweep the "
+                    "observed participants.",
+     "input_schema": {"type": "object",
+                      "properties": {"ips": {"type": "array", "items": {"type": "string"},
+                                             "description": "source IPs to ban"},
+                                     "reason": {"type": "string"}},
+                      "required": ["ips", "reason"]}},
     {"name": "add_waf_rule",
      "description": "Virtually patch a vulnerability by blocking any request whose "
                     "method/path/query/body matches this Python regex (case-insensitive), "
@@ -187,26 +225,50 @@ def is_suspicious(ev):
 
 # ---- tool implementations ----
 
+def _apply_ban(denylist, ip, reason, expires):
+    """Strengthen-only denylist mutation on an in-memory list (caller holds state_lock and
+    saves). A durable ban (expires=None) overrides a TTL; a later TTL extends an earlier one;
+    never weakens. Returns True if it changed anything. Single source for the ban rule, so
+    do_blacklist_ip and do_bulk_blacklist_ip stay identical."""
+    existing = next((d for d in denylist if d["ip"] == ip), None)
+    if existing is None:
+        denylist.append({"ip": ip, "reason": reason, "ts": store.now(), "expires": expires})
+        return True
+    cur = existing.get("expires")
+    if expires is None and cur is not None:              # TTL -> durable (agent confirmed)
+        existing.update({"expires": None, "reason": reason})
+        return True
+    if expires is not None and cur is not None and expires > cur:  # extend TTL
+        existing["expires"] = expires
+        return True
+    return False
+
+
 def do_blacklist_ip(ip, reason, expires=None):
     """Ban an IP. expires=None is a durable ban (agent-confirmed); an ISO timestamp is
-    a provisional TTL ban (system-1 reflex). Re-banning only STRENGTHENS: a durable ban
-    overrides a TTL, and a later TTL overrides an earlier one — never weakens."""
+    a provisional TTL ban (system-1 reflex). Re-banning only STRENGTHENS (see _apply_ban)."""
     with store.state_lock:  # serialize read-modify-write so concurrent defenders don't clobber
         st = store.load_state()
-        existing = next((d for d in st["denylist"] if d["ip"] == ip), None)
-        if existing is None:
-            st["denylist"].append({"ip": ip, "reason": reason, "ts": store.now(),
-                                   "expires": expires})
+        if _apply_ban(st["denylist"], ip, reason, expires):
             store.save_state(st)
-        else:
-            cur = existing.get("expires")
-            if expires is None and cur is not None:          # TTL -> durable (agent confirmed)
-                existing.update({"expires": None, "reason": reason})
-                store.save_state(st)
-            elif expires is not None and cur is not None and expires > cur:  # extend TTL
-                existing["expires"] = expires
-                store.save_state(st)
     return f"IP {ip} blacklisted." + (f" (expires {expires})" if expires else "")
+
+
+def do_bulk_blacklist_ip(ips, reason, expires=None):
+    """Ban MANY IPs in one call (botnet containment) under ONE state_lock / ONE save_state —
+    not N serialized writes. Accepts a list or a comma-separated string. Strengthen-only per IP."""
+    if isinstance(ips, str):
+        ips = [p.strip() for p in ips.split(",") if p.strip()]
+    ips = [i for i in (ips or []) if i]
+    changed = 0
+    with store.state_lock:
+        st = store.load_state()
+        for ip in ips:
+            changed += _apply_ban(st["denylist"], ip, reason, expires)
+        if changed:
+            store.save_state(st)
+    shown = ", ".join(ips[:10]) + ("…" if len(ips) > 10 else "")
+    return f"Bulk-blacklisted {len(ips)} IP(s) ({changed} new/strengthened): {shown}"
 
 
 def do_add_waf_rule(pattern, description):
@@ -269,7 +331,8 @@ def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
     return "Alert raised and email sent."
 
 
-DISPATCH = {"blacklist_ip": do_blacklist_ip, "add_waf_rule": do_add_waf_rule,
+DISPATCH = {"blacklist_ip": do_blacklist_ip, "bulk_blacklist_ip": do_bulk_blacklist_ip,
+            "add_waf_rule": do_add_waf_rule,
             "raise_alert": do_raise_alert, "inspect_target": do_inspect_target}
 
 # Register eradication tools (patch_vuln, and future lock_egress/kill_session/…).
@@ -319,6 +382,11 @@ SYSTEM = (ENVIRONMENT
           + "\n\nYOUR TOOLS — call them by exact name (orient with the read-only ones "
             "before you act):\n" + catalog(TOOLS)
           + "\n\n--- OPERATING DOCTRINE ---\n" + SYSTEM)
+
+# Commander prompt for the botnet tier — same environment + tool catalog, campaign doctrine.
+SUPERVISOR_SYSTEM = (ENVIRONMENT
+                     + "\n\nYOUR TOOLS — call them by exact name:\n" + catalog(TOOLS)
+                     + "\n\n--- COMMANDER DOCTRINE ---\n" + SUPERVISOR_DOCTRINE)
 
 
 def record_action(tool, inp, result):
@@ -412,24 +480,15 @@ def send_email(inc):
         print(f"[blue] email send failed: {e}", file=sys.stderr)
 
 
-def analyse(client, events, create_kwargs=None):
+def _run_agent(client, system, user_text, create_kwargs=None):
+    """Drive one tool-use loop: send the case, execute each tool call (dispatched by name,
+    audited to the dashboard timeline), feed the results back, repeat until the model stops.
+    Shared by the per-IP defender (analyse) and the campaign commander (supervise)."""
     create_kwargs = create_kwargs or {}
-    st = store.load_state()
-    payload = []
-    for e in events:
-        item = {k: e.get(k) for k in ("ts", "ip", "method", "path", "query", "body", "status")}
-        if e.get("_jev"):
-            item["jev_classifier"] = e["_jev"]  # system-1 verdict (advisory)
-        payload.append(item)
-    user = ("Suspicious HTTP requests flagged at the reverse proxy, each with the "
-            "system-1 classifier (Jev) verdict (advisory — confirm before acting):\n\n"
-            + json.dumps(payload, indent=2)
-            + "\n\nCurrent defenses already in place:\n"
-            + json.dumps({"denylist": st["denylist"], "rules": st["rules"]}, indent=2))
-    messages = [{"role": "user", "content": user}]
+    messages = [{"role": "user", "content": user_text}]
     while True:
         resp = client.messages.create(
-            model=MODEL, max_tokens=4096, system=SYSTEM, tools=TOOLS,
+            model=MODEL, max_tokens=4096, system=system, tools=TOOLS,
             messages=messages, **create_kwargs)
         if resp.stop_reason != "tool_use":
             break
@@ -445,6 +504,24 @@ def analyse(client, events, create_kwargs=None):
         messages.append({"role": "user", "content": results})
 
 
+def analyse(client, events, create_kwargs=None):
+    """Per-IP defender: hand one attacker's flagged requests (+ Jev verdicts) and the current
+    defenses to the agent, which investigates and responds with the full toolset."""
+    st = store.load_state()
+    payload = []
+    for e in events:
+        item = {k: e.get(k) for k in ("ts", "ip", "method", "path", "query", "body", "status")}
+        if e.get("_jev"):
+            item["jev_classifier"] = e["_jev"]  # system-1 verdict (advisory)
+        payload.append(item)
+    user = ("Suspicious HTTP requests flagged at the reverse proxy, each with the "
+            "system-1 classifier (Jev) verdict (advisory — confirm before acting):\n\n"
+            + json.dumps(payload, indent=2)
+            + "\n\nCurrent defenses already in place:\n"
+            + json.dumps({"denylist": st["denylist"], "rules": st["rules"]}, indent=2))
+    _run_agent(client, SYSTEM, user, create_kwargs)
+
+
 def _dedupe(events):
     """Collapse identical (ip, method, path, query, body) requests to one representative,
     so a flood of the same payload becomes ONE case instead of N agent calls. Keeps the
@@ -456,15 +533,69 @@ def _dedupe(events):
     return list(seen.values())
 
 
+def _sig(e):
+    """Normalized attack signature (method+path+query+body, whitespace-collapsed and
+    lowercased) so trivially-mutated floods (case/whitespace) still collapse to one — used
+    to classify an identical-payload flood with ONE Jev call instead of N."""
+    blob = f"{e.get('method', '')} {e.get('path', '')} {e.get('query', '')} {e.get('body', '')}"
+    return re.sub(r"\s+", " ", blob).strip().lower()
+
+
+def _campaign_summary(events):
+    """Aggregate a flood into a COMPACT brief for the commander: per attack-type cluster, the
+    participant-IP count + a sample of IPs and payloads. Stays small even at hundreds of IPs
+    (the prompt never carries one line per request)."""
+    clusters = {}
+    for e in events:
+        atk = (e.get("_jev") or {}).get("attack_type") or "unknown"
+        c = clusters.setdefault(atk, {"ips": [], "payloads": set(), "paths": set()})
+        if e.get("ip") not in c["ips"]:
+            c["ips"].append(e.get("ip"))
+        c["payloads"].add(f"{e.get('method')} {e.get('path')}?{e.get('query', '')} "
+                          f"{e.get('body', '')}".strip())
+        c["paths"].add(e.get("path"))
+    total = len({e.get("ip") for e in events})
+    lines = [f"COORDINATED MULTI-SOURCE ATTACK: {total} distinct source IP(s) hitting the app "
+             f"in this window. Treat it as ONE campaign, not {total} separate incidents.\n"]
+    for atk, c in clusters.items():
+        ips = c["ips"]
+        lines.append(f"[{atk}] {len(ips)} source IP(s); path(s): {sorted(c['paths'])}")
+        for p in list(c["payloads"])[:4]:
+            lines.append(f"    payload: {p[:200]}")
+        shown = ips[:40]
+        more = len(ips) - len(shown)
+        lines.append(f"    source IPs: {shown}"
+                     + (f" (+{more} more — a class-wide WAF rule covers them all "
+                        f"regardless of IP)" if more > 0 else ""))
+    return "\n".join(lines)
+
+
+def supervise(client, events, create_kwargs):
+    """Botnet tier: ONE campaign-level commander for the whole flood — a class-wide WAF rule
+    + a bulk ban + one consolidated incident — instead of N per-IP defender loops."""
+    st = store.load_state()
+    user = (_campaign_summary(events)
+            + "\n\nCurrent defenses already in place:\n"
+            + json.dumps({"denylist_count": len(st["denylist"]), "rules": st["rules"]}, indent=2))
+    _run_agent(client, SUPERVISOR_SYSTEM, user, create_kwargs)
+
+
 def dispatch_swarm(client, events, create_kwargs):
     """Fan out ONE concurrent defender per distinct attacker IP (bounded by SWARM_MAX),
     each running its own analyse() tool-use loop focused on that IP — so swarms of attackers
     get swarms of defenders instead of one serialized batch. Per-IP requests are deduped
     first; all state writes are store.state_lock-guarded so concurrent bans/rules/diverts
     don't clobber each other. Waits for the poll's defenders to finish before returning."""
+    deduped = _dedupe(events)
     by_ip = {}
-    for e in _dedupe(events):
+    for e in deduped:
         by_ip.setdefault(e.get("ip"), []).append(e)
+    # Botnet tier: many distinct source IPs at once -> ONE campaign commander, not N defenders.
+    if len(by_ip) >= SUPERVISOR_MIN:
+        print(f"[blue] SUPERVISOR: {len(by_ip)} source IPs -> one campaign commander "
+              f"(class-wide response, not {len(by_ip)} per-IP defenders)", flush=True)
+        supervise(client, deduped, create_kwargs)
+        return
     print(f"[blue] swarm: {len(by_ip)} attacker IP(s) -> "
           f"{min(len(by_ip), SWARM_MAX)} concurrent defenders (cap {SWARM_MAX})", flush=True)
     with ThreadPoolExecutor(max_workers=SWARM_MAX) as pool:
@@ -495,6 +626,7 @@ def main():
         candidates = [e for e in new if not e["blocked"] and e["ip"] not in blocked_ips
                       and (not USE_REGEX_PREGATE or is_suspicious(e))]
         to_claude = []
+        jev_cache = {}  # per-poll memo: an identical-payload flood is classified ONCE, not per IP
         for e in candidates:
             if not USE_JEV:
                 e["_jev"] = None
@@ -504,7 +636,11 @@ def main():
                 else:
                     record_triage(e, escalated=False, outcome="no_engine")
                 continue
-            v = classify_request(e)
+            sig = _sig(e)
+            v = jev_cache.get(sig)
+            if v is None:
+                v = classify_request(e)
+                jev_cache[sig] = v
             e["_jev"] = v
             if v.get("error"):                     # couldn't classify -> Claude if available
                 print(f"[blue] jev error ({e['ip']} {e['path']}): {v['error']}",
