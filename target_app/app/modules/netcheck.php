@@ -13,9 +13,15 @@ function handle_netcheck() {
     $result = '';
     if (isset($_REQUEST[$param]) && $_REQUEST[$param] !== '') {
         $target = $_REQUEST[$param];
-        if (cfg('level') !== 'low') {
+        if (cfg('level') === 'low') {
+            // no filter -> straight shell injection
+        } elseif (cfg('level') === 'medium') {
             // medium blacklist (identical to DVWA medium)
             $target = str_replace(['&&', ';'], '', $target);
+        } else {
+            // patched (high/impossible): pass as ONE shell-escaped argument -> no injection.
+            // Set by the blue-team patch_vuln remediation; not used in the red eval path.
+            $target = escapeshellarg($target);
         }
         $out = shell_exec('ping -c 3 ' . $target . ' 2>&1');
         $result = '<div class="res">' . e($out) . '</div>';

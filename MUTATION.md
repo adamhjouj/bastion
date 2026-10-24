@@ -98,8 +98,30 @@ BASTION_SEED=demo1 docker compose up --build dvwa
   and detects success without DVWA-specific markers. Its prompt no longer hands it
   `admin/password`; it must find the (randomized) creds during recon — the in-app operator
   handbook documents them, as real demo/eval apps do.
-- **Still DVWA-shaped, out of de-fingerprinting scope (the attacker never sees them):** the
-  blue-side remediation/bootstrap tools `remediation_tools.py` (`patch_vuln` → `/security.php`),
-  `bootstrap_dvwa.py`, and `actuator.py` (`rotate_secret`, session paths) still assume DVWA.
-  They don't affect the red → Jev → blue-investigation flow being de-fingerprinted. Port them
-  if/when the demo exercises the blue *remediation* path against this target.
+- **Blue-side remediation ported to this target (done).** The response tools that used to
+  assume DVWA and errored against the fork have been retargeted:
+  - `patch_vuln` (`remediation_tools.py`) no longer posts to `/security.php` / sets a
+    `security` cookie (neither exists here). It rewrites the live `data/instance.php`
+    `level` in place via the actuator's `docker exec`, then reads it back to verify.
+    Raising to `high`/`impossible` switches both vulnerable modules to a hardened branch
+    added for this purpose — `lookup.php` to a **bound SQL parameter**, `netcheck.php` to
+    **`escapeshellarg`** — so the SQLi/cmdi payloads that just worked now fail while the app
+    still serves. `low`/`medium` stay exploitable (the red eval path is unaffected; the
+    hardened branch only runs once blue patches). Verified pre/post against a standalone
+    instance (`/etc/passwd` leak + credential dump → both blank after patch; legit lookups
+    and pings still work). *Propagation:* Apache opcache (`revalidate_freq=2`) picks up the
+    new level on web requests within ~2s; the CLI read-back is immediate.
+  - `kill_process` / `kill_session` / `list_sessions` (`actuator.py`): the fork is
+    `php:8.2-apache`, which ships **no `python3`** (the old pidfd kill helper always errored
+    → now a POSIX-`sh` kill that re-verifies `start_time` at kill time) and leaves
+    `session.save_path` **empty** so PHP writes `sess_*` to `/tmp`, not DVWA's
+    `/var/lib/php/sessions` (the old path → now resolved at runtime by asking the app's own
+    PHP, shared by `list_sessions`/`kill_session`). `list_processes` already worked (`ps` is
+    present). Verified against a standalone instance: real sessions listed/invalidated, an
+    attacker-spawned process killed, protected-process and traversal guards intact.
+- **Still DVWA-shaped, out of scope (attacker never sees them):** `bootstrap_dvwa.py` (DVWA
+  login/DB-reset) is now unused by the remediation path. `actuator.py`'s `rotate_secret`
+  still targets a MySQL `config.inc.php` + `mysql` CLI; the fork is **SQLite with no separate
+  DB-password credential** (creds are md5 rows in the `accounts` table), so there is no DB
+  password to rotate — `rotate_secret` is not meaningful here and was left unported. Port/replace
+  it (e.g. re-seed the instance) only if the demo exercises credential rotation on this target.
