@@ -36,7 +36,7 @@ except Exception:
 from tools import ORIENT_REGISTER, catalog, ENVIRONMENT
 
 MODEL = llm.model_for(os.environ.get("BLUE_MODEL"), "claude-sonnet-5")
-POLL = 1.0
+POLL = 0.5  # poll cadence (s): halved for snappier detection on the demo stage
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
 USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
 USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
@@ -97,13 +97,17 @@ SYSTEM = (
     "divert, patch, incident) is yours to take or withhold.\n\n"
     "The Jev system-1 classifier already flagged these as SUSPICIOUS, but it is "
     "twitchy and advisory — a flag is a reason to LOOK, not proof of an attack. "
-    "Before acting on any request you are not certain about, call inspect_target "
-    "to get read-only structural evidence (decoded params, path-escape check, "
-    "shell/SQL/XSS tokens, whether the endpoint is real). If that evidence shows the "
-    "request is benign (e.g. a bare host like ip=127.0.0.1 with no shell metacharacters, "
-    "or a file param that stays inside its directory), reply 'no threat' and take NO "
-    "action — do not blacklist or add a rule. Only act on a confirmed attack.\n\n"
-    "For each distinct attacker you CONFIRM is malicious:\n"
+    "DECIDE FAST: the read-only structural evidence (decoded params, path-escape check, "
+    "shell/SQL/XSS tokens, whether the endpoint is real), the current defenses, and this "
+    "IP's recent request history are ALL PROVIDED INLINE BELOW. Judge from that evidence "
+    "directly — do NOT call inspect_target, get_defenses, recent_requests or "
+    "recent_incidents to re-gather what you already have; that wastes round-trips. If the "
+    "evidence shows the request is benign (e.g. a bare host like ip=127.0.0.1 with no shell "
+    "metacharacters, or a file param that stays inside its directory), reply 'no threat' and "
+    "take NO action. Only act on a confirmed attack — and when you confirm one, act THIS "
+    "TURN.\n\n"
+    "For each distinct attacker you CONFIRM is malicious, issue these in a SINGLE response "
+    "(emit the tool calls together, do not spread them across turns):\n"
     "1. call blacklist_ip on the source IP;\n"
     "2. call add_waf_rule with a TIGHT regex that blocks that specific exploit "
     "pattern (match the payload tokens, e.g. 'union\\s+select' or ';\\s*cat', NOT "
@@ -136,9 +140,10 @@ SYSTEM = (
     "help; the source IP is client-asserted and spoofable); prefer a class-wide add_waf_rule over an IP ban.\n"
     "- Active, ongoing, high-severity compromise you cannot otherwise contain -> quarantine_container "
     "(freezes the target); release_container once safe. Nuclear, last resort.\n"
-    "Orient before acting: get_defenses (what you already enforce; never duplicate it), recent_requests "
-    "(is this IP still probing / is it a flood), service_status (is the target already quarantined). "
-    "Act proportionally to the confirmed severity, then stop.\n\n"
+    "Current defenses and this IP's recent requests are PROVIDED INLINE — do not re-fetch them. "
+    "Call a read-only tool ONLY for something not already given (e.g. list_processes on a confirmed "
+    "RCE, service_status if you suspect the target is already quarantined). Act proportionally to the "
+    "confirmed severity, in one step, then stop.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -524,18 +529,27 @@ def _run_agent(client, system, user_text, create_kwargs=None):
 
 
 def analyse(client, events, create_kwargs=None):
-    """Per-IP defender: hand one attacker's flagged requests (+ Jev verdicts) and the current
-    defenses to the agent, which investigates and responds with the full toolset."""
+    """Per-IP defender: hand one attacker's flagged requests (+ Jev verdicts), PRE-COMPUTED
+    structural evidence, this IP's recent history, and the current defenses — so the agent
+    confirms and responds in its FIRST turn instead of spending round-trips re-gathering."""
     st = store.load_state()
     payload = []
     for e in events:
         item = {k: e.get(k) for k in ("ts", "ip", "method", "path", "query", "body", "status")}
         if e.get("_jev"):
             item["jev_classifier"] = e["_jev"]  # system-1 verdict (advisory)
+        # Pre-compute the read-only structural evidence the agent used to fetch via
+        # inspect_target — now it's already in the prompt, saving a round-trip per request.
+        item["structural_evidence"] = do_inspect_target(
+            e.get("path", ""), e.get("method", "GET"), e.get("query", ""), e.get("body", ""))
         payload.append(item)
-    user = ("Suspicious HTTP requests flagged at the reverse proxy, each with the "
-            "system-1 classifier (Jev) verdict (advisory — confirm before acting):\n\n"
-            + json.dumps(payload, indent=2)
+    ip = events[0].get("ip") if events else None
+    recent = [r for r in store.read_jsonl(store.EVENTS_FILE, limit=200)
+              if r.get("ip") == ip][-15:]  # this IP's recent history (kill-chain), front-loaded
+    user = ("Suspicious HTTP requests flagged at the reverse proxy, each with the system-1 "
+            "classifier (Jev) verdict AND pre-computed structural evidence — confirm, then act "
+            "this turn:\n\n" + json.dumps(payload, indent=2)
+            + f"\n\nRecent request history from this IP ({ip}):\n" + json.dumps(recent, indent=2)
             + "\n\nCurrent defenses already in place:\n"
             + json.dumps({"denylist": st["denylist"], "rules": st["rules"]}, indent=2))
     _run_agent(client, SYSTEM, user, create_kwargs)
@@ -680,7 +694,7 @@ def main():
                 # Jev FLAGS -> the agent DECIDES (owns ban/rule/divert/patch/incident).
                 # Optional reversible holding action only; Jev enforces nothing itself.
                 if JEV_AUTOBLOCK and score >= AUTOBLOCK_HIGH:
-                    reflex_divert(e, v)
+                    reflex_divert(e, v)    # opt-in reversible holding action only; the AGENT decides
                 to_claude.append(e)
                 record_triage(e, escalated=True, outcome="claude")
             elif JEV_AUTOBLOCK:

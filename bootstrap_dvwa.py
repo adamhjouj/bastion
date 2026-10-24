@@ -18,7 +18,21 @@ def authed_session(base_url, xff=None, user="admin", password="password"):
     """Return a logged-in DVWA httpx session (Security=Low). base_url can be the
     app directly or the proxy; xff sets X-Forwarded-For (the attacker's IP)."""
     headers = {"X-Forwarded-For": xff} if xff else {}
-    c = httpx.Client(base_url=base_url, headers=headers, follow_redirects=True, timeout=20)
+    # On a fresh DB, DVWA regenerates the session id on login, so across the
+    # setup->login->security flow the jar accumulates stale/duplicate PHPSESSID
+    # cookies and httpx sends the wrong one -> the session lands logged-out
+    # (the #1 demo-day flake). Record every PHPSESSID the server issues, then pin
+    # the jar to the last one. Harmless on a warm DB (only one is ever issued).
+    issued = []
+
+    def _grab(resp):
+        for sc in resp.headers.get_list("set-cookie"):
+            m = re.search(r"PHPSESSID=([^;]+)", sc)
+            if m:
+                issued.append(m.group(1))
+
+    c = httpx.Client(base_url=base_url, headers=headers, follow_redirects=True,
+                     timeout=20, event_hooks={"response": [_grab]})
 
     r = c.get("/setup.php")                                   # create/reset DB (idempotent)
     c.post("/setup.php", data={"create_db": "Create / Reset Database",
@@ -26,10 +40,14 @@ def authed_session(base_url, xff=None, user="admin", password="password"):
     r = c.get("/login.php")                                   # log in
     c.post("/login.php", data={"username": user, "password": password,
                                "Login": "Login", "user_token": _token(r.text)})
-    r = c.get("/security.php")                                # drop to Low
-    c.post("/security.php", data={"security": "low", "seclev_submit": "Submit",
+    r = c.get("/security.php")                                # set deployed level: medium
+    c.post("/security.php", data={"security": "medium", "seclev_submit": "Submit",
                                   "user_token": _token(r.text)})
-    c.cookies.set("security", "low")                          # belt and suspenders
+
+    c.cookies.clear()                                         # drop stale/duplicate PHPSESSID
+    if issued:
+        c.cookies.set("PHPSESSID", issued[-1])               # pin the authenticated session id
+    c.cookies.set("security", "medium")                      # belt and suspenders
     return c
 
 
