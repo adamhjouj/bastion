@@ -20,10 +20,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 import store
 
 DVWA_URL = os.environ.get("DVWA_URL", "http://localhost:80")
+HONEYPOT_URL = os.environ.get("HONEYPOT_URL")  # decoy base url; divert disabled if unset
 BASE = Path(__file__).resolve().parent
 
 app = FastAPI()
 client = httpx.AsyncClient(base_url=DVWA_URL, follow_redirects=False, timeout=15)
+honeypot_client = (httpx.AsyncClient(base_url=HONEYPOT_URL, follow_redirects=False, timeout=15)
+                   if HONEYPOT_URL else None)
 
 # hop-by-hop headers we must not forward verbatim
 HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer",
@@ -158,6 +161,27 @@ async def proxy(path: str, request: Request):
     # (e.g. 'union\s+select') catch url-encoded attacks too.
     probe = f"{request.method} /{path}?{unquote_plus(qs)} {unquote_plus(body.decode('utf-8', 'ignore'))}"
     st, rules = get_state()
+
+    # 0. Honeypot divert — DELIBERATELY takes precedence over the denylist AND WAF rules
+    #    below. A studied attacker should keep reaching the decoy with ALL their traffic
+    #    (even payloads that would otherwise 403): a block tips them off and ends the TTP
+    #    harvest, a silent divert does not. To fully cut an IP off, undivert it first, then
+    #    the denylist 403 applies. Logged as 'diverted' (blocked=False), never a block.
+    if honeypot_client is not None and any(d["ip"] == ip for d in st.get("honeypot", [])):
+        hp_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+        hp_headers["accept-encoding"] = "identity"
+        try:
+            up = await honeypot_client.request(request.method, "/" + path,
+                                               params=dict(request.query_params),
+                                               content=body, headers=hp_headers)
+        except httpx.HTTPError as e:
+            store.append_jsonl(store.EVENTS_FILE,
+                               _event(ip, request.method, path, qs, body, 502, False, "diverted"))
+            return JSONResponse({"error": "upstream", "detail": str(e)}, status_code=502)
+        store.append_jsonl(store.EVENTS_FILE,
+                           _event(ip, request.method, path, qs, body, up.status_code, False, "diverted"))
+        resp_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP}
+        return Response(content=up.content, status_code=up.status_code, headers=resp_headers)
 
     # 1. IP denylist (skip entries whose TTL has expired — provisional reflex bans
     #    auto-lift; a null/absent 'expires' is a permanent ban)

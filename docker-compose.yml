@@ -12,9 +12,20 @@ services:
     command: ["./entrypoint-proxy.sh"]
     environment:
       DVWA_URL: http://dvwa:80
+      HONEYPOT_URL: http://honeypot:9000   # diverted IPs land here instead of DVWA
     ports: ["8080:8080"]
     volumes: ["bastion-data:/app/data"]
-    depends_on: [dvwa]
+    depends_on: [dvwa, honeypot]
+    restart: unless-stopped
+  honeypot:
+    image: bastion-app
+    command: ["python", "honeypot_app.py"]
+    environment:
+      HONEYPOT_PORT: "9000"
+    # ponytail: decoy shares the data volume only to append honeypot_hits.jsonl — it has
+    # NO DVWA/MySQL access and serves one static fake page. For a real deploy put it on an
+    # internal (no-egress) network so a curious attacker can't pivot out of the landing zone.
+    volumes: ["bastion-data:/app/data"]
     restart: unless-stopped
   blue:
     image: bastion-app
