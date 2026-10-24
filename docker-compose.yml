@@ -1,9 +1,30 @@
 services:
   dvwa:
     image: vulnerables/web-dvwa
-    ports: ["80:80"]
     restart: unless-stopped
   mailhog:
     image: mailhog/mailhog
-    ports: ["1025:1025", "8025:8025"]
+    ports: ["8025:8025"]        # web UI (SMTP :1025 stays internal)
     restart: unless-stopped
+  proxy:
+    build: .
+    image: bastion-app
+    command: ["./entrypoint-proxy.sh"]
+    environment:
+      DVWA_URL: http://dvwa:80
+    ports: ["8080:8080"]
+    volumes: ["bastion-data:/app/data"]
+    depends_on: [dvwa]
+    restart: unless-stopped
+  blue:
+    image: bastion-app
+    command: ["python", "blue_agent.py"]
+    env_file: .env             # brings TYPESAFE_API_KEY (+ ANTHROPIC_API_KEY if set)
+    environment:
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
+    volumes: ["bastion-data:/app/data"]
+    depends_on: [proxy, mailhog]
+    restart: unless-stopped
+volumes:
+  bastion-data:

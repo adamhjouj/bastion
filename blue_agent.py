@@ -20,6 +20,18 @@ POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
 USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
 USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
+# Jev's verdict drives the WAF directly (fast reflex, no Claude needed).
+JEV_AUTOBLOCK = os.environ.get("JEV_AUTOBLOCK", "1") == "1"
+# Claude (system-2) is optional enrichment; on only if an Anthropic key is present.
+USE_CLAUDE = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+# Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
+CANNED_WAF = {
+    "sql_injection": r"(?i)(union\s+select|\bor\s+1\s*=\s*1|'\s*or\s*'|information_schema|\bsleep\s*\(|--\s|\bupdatexml\b)",
+    "command_injection": r"(?i)(;\s*\w|\|\||&&|\$\(|`|/etc/passwd|/bin/|\b(cat|whoami|id|uname|nc|wget|curl)\b)",
+    "xss": r"(?i)(<script|onerror\s*=|onload\s*=|javascript:)",
+    "path_traversal": r"(?i)(\.\./|\.\.\\|%2e%2e|/etc/passwd)",
+}
 
 # Gate: only requests containing these tokens are worth an LLM call.
 # ponytail: naive signature pre-filter — it only decides what to *look* at;
@@ -116,6 +128,24 @@ DISPATCH = {"blacklist_ip": do_blacklist_ip, "add_waf_rule": do_add_waf_rule,
             "raise_alert": do_raise_alert}
 
 
+def autoblock(event, verdict):
+    """Jev-driven WAF enforcement — no LLM. Ban the IP, add the canned virtual
+    patch for the attack type, and alert. This is 'Jev in the WAF'."""
+    ip = event["ip"]
+    atk = verdict["attack_type"]
+    score = verdict.get("malicious_score") or 0.0
+    evidence = f"{event.get('method')} {event.get('path')}?{event.get('query', '')} {event.get('body', '')}".strip()
+    actions = [do_blacklist_ip(ip, f"Jev-confirmed {atk} (score {score:.2f})")]
+    rule = CANNED_WAF.get(atk)
+    if rule:
+        actions.append(do_add_waf_rule(rule, f"auto: block {atk} (Jev)"))
+    sev = "critical" if score >= 0.9 else "high"
+    do_raise_alert(sev, atk, ip, evidence,
+                   "Jev system-1 confirmed attack; " + "; ".join(actions))
+    print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> banned + "
+          f"{'WAF rule + ' if rule else ''}email", flush=True)
+
+
 def send_email(inc):
     host = os.environ.get("SMTP_HOST", "localhost")
     port = int(os.environ.get("SMTP_PORT", "1025"))
@@ -175,34 +205,49 @@ def analyse(client, events):
 
 
 def main():
-    client = anthropic.Anthropic()
-    print(f"[blue] watching {store.EVENTS_FILE} with {MODEL}", flush=True)
+    client = anthropic.Anthropic() if USE_CLAUDE else None
+    mode = "+".join(m for m, on in (("regex", USE_REGEX_PREGATE), ("Jev", USE_JEV),
+                                    ("autoblock", JEV_AUTOBLOCK and USE_JEV),
+                                    ("Claude", USE_CLAUDE)) if on) or "none"
+    print(f"[blue] watching {store.EVENTS_FILE}; pipeline: {mode}", flush=True)
+    if not USE_JEV and not USE_CLAUDE:
+        print("[blue] WARNING: no decision engine (no Jev key, no Anthropic key)",
+              file=sys.stderr, flush=True)
     offset = len(store.read_jsonl(store.EVENTS_FILE))  # skip pre-existing lines
     while True:
         evs = store.read_jsonl(store.EVENTS_FILE)
         new, offset = evs[offset:], len(evs)
         blocked_ips = {d["ip"] for d in store.load_state()["denylist"]}
-        # cheap regex pre-gate -> system-1 (Jev) classify -> escalate confirmed malicious
         candidates = [e for e in new if not e["blocked"] and e["ip"] not in blocked_ips
                       and (not USE_REGEX_PREGATE or is_suspicious(e))]
-        escalate = []
+        to_claude = []
         for e in candidates:
             if not USE_JEV:
-                escalate.append(e)
+                if USE_CLAUDE:
+                    to_claude.append(e)
                 continue
             v = classify_request(e)
             e["_jev"] = v
-            if v.get("malicious") or v.get("error"):  # fail-safe: escalate if Jev errors
-                escalate.append(e)
-                print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
-                      f"malicious={v.get('malicious')} type={v.get('attack_type')} "
-                      f"score={v.get('malicious_score')}", flush=True)
-        if escalate:
-            print(f"[blue] {len(escalate)} confirmed-suspicious -> main agent", flush=True)
+            if v.get("error"):                     # couldn't classify -> Claude if available
+                print(f"[blue] jev error ({e['ip']} {e['path']}): {v['error']}",
+                      file=sys.stderr, flush=True)
+                if USE_CLAUDE:
+                    to_claude.append(e)
+                continue
+            if not v.get("malicious"):             # Jev says benign -> drop
+                continue
+            print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
+                  f"{v['attack_type']} ({v['malicious_score']:.2f})", flush=True)
+            if JEV_AUTOBLOCK:
+                autoblock(e, v)                    # Jev drives the WAF directly
+            elif USE_CLAUDE:
+                to_claude.append(e)
+        if to_claude and client is not None:
+            print(f"[blue] {len(to_claude)} -> Claude (system-2)", flush=True)
             try:
-                analyse(client, escalate)
-            except Exception as e:
-                print(f"[blue] analyse error: {e}", file=sys.stderr, flush=True)
+                analyse(client, to_claude)
+            except Exception as ex:
+                print(f"[blue] analyse error: {ex}", file=sys.stderr, flush=True)
         time.sleep(POLL)
 
 

@@ -1,0 +1,9 @@
+.env
+data/
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pull.log
+architecture.md
+plans/

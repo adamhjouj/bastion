@@ -6,6 +6,7 @@ import types
 import urllib.request
 
 import blue_agent
+import classifier
 import store
 
 
@@ -40,7 +41,51 @@ class StubClient:
         self.messages = StubMessages()
 
 
+def test_jev_mock(monkeypatch=None):
+    """Jev classifier against MOCK network responses (no key, no real call)."""
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._p
+
+    sqli_payload = {"answers": {
+        "malicious": {"type": "noul", "noul": 0.97},
+        "attack_type": {"type": "choice", "choice": "sql_injection", "confidence": 0.95,
+                        "probabilities": {"sql_injection": 0.95, "benign": 0.05}}}}
+    benign_payload = {"answers": {
+        "malicious": {"type": "noul", "noul": 0.03},
+        "attack_type": {"type": "choice", "choice": "benign", "confidence": 0.99,
+                        "probabilities": {"benign": 0.99}}}}
+
+    # malicious mock
+    classifier.httpx.post = lambda *a, **k: FakeResp(sqli_payload)
+    v = classifier.classify_request({"method": "GET", "path": "/vulnerabilities/sqli/",
+                                     "query": "id=1' UNION SELECT ...", "body": "", "ip": "1.1.1.1"})
+    assert v["malicious"] is True and v["attack_type"] == "sql_injection", v
+
+    # benign mock
+    classifier.httpx.post = lambda *a, **k: FakeResp(benign_payload)
+    v = classifier.classify_request({"method": "GET", "path": "/login.php",
+                                     "query": "", "body": "", "ip": "2.2.2.2"})
+    assert v["malicious"] is False, v
+
+    # network error -> fail-safe (malicious None, caller escalates)
+    def boom(*a, **k):
+        raise RuntimeError("connection refused")
+    classifier.httpx.post = boom
+    v = classifier.classify_request({"method": "GET", "path": "/x", "query": "", "body": "", "ip": "3.3.3.3"})
+    assert v["malicious"] is None and "error" in v, v
+    print("OK jev classifier (mock network: malicious / benign / error-failsafe)")
+
+
 def main():
+    test_jev_mock()
+
     # fresh state
     store.save_state(json.loads(json.dumps(store.DEFAULT_STATE)))
     open(store.INCIDENTS_FILE, "w").close()
