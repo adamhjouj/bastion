@@ -6,6 +6,8 @@ reach the app. Also serves the dashboard (/__dashboard) and its data (/__state).
 # ponytail: demo proxy — no TLS, naive forwarding, single worker, body buffered
 # in memory. Swap for Caddy + ModSecurity if it must survive real traffic.
 """
+import asyncio
+import json
 import os
 import re
 from pathlib import Path
@@ -13,7 +15,7 @@ from urllib.parse import unquote_plus
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 import store
 
@@ -77,15 +79,62 @@ async def dashboard():
     return (BASE / "dashboard.html").read_text()
 
 
-@app.get("/__state")
-async def state_api():
+# Files whose mtime changing means "something happened" (for SSE push).
+_WATCH = [store.EVENTS_FILE, store.STATE_FILE, store.INCIDENTS_FILE, store.ACTIONS_FILE,
+          store.DVWA_LOG, store.PROXY_LOG, store.BLUE_LOG, store.RED_LOG]
+
+
+def build_state():
+    """Everything the dashboard renders, in one snapshot."""
     st, _ = get_state()
-    return JSONResponse({
+    return {
         "events": store.read_jsonl(store.EVENTS_FILE, limit=200)[::-1],
+        "events_total": store.count_lines(store.EVENTS_FILE),
+        "actions": store.read_jsonl(store.ACTIONS_FILE, limit=400)[::-1],
         "incidents": store.read_jsonl(store.INCIDENTS_FILE)[::-1],
         "denylist": st.get("denylist", []),
         "rules": st.get("rules", []),
-    })
+        "logs": {
+            "dvwa": store.tail_lines(store.DVWA_LOG),
+            "proxy": store.tail_lines(store.PROXY_LOG),
+            "blue": store.tail_lines(store.BLUE_LOG),
+            "red": store.tail_lines(store.RED_LOG),
+        },
+    }
+
+
+def _watch_sig():
+    sig = []
+    for p in _WATCH:
+        try:
+            sig.append(p.stat().st_mtime)
+        except FileNotFoundError:
+            sig.append(0.0)
+    return tuple(sig)
+
+
+@app.get("/__state")
+async def state_api():
+    return JSONResponse(build_state())
+
+
+@app.get("/__stream")
+async def stream_api():
+    """Server-Sent Events: push a fresh snapshot whenever any watched file changes."""
+    async def gen():
+        last = None
+        beat = 0
+        while True:
+            sig = _watch_sig()
+            if sig != last:
+                last = sig
+                yield "data: " + json.dumps(build_state()) + "\n\n"
+            else:
+                beat += 1
+                if beat % 20 == 0:  # ~10s keep-alive comment
+                    yield ": keep-alive\n\n"
+            await asyncio.sleep(0.5)
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.api_route("/{path:path}",

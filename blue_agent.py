@@ -170,6 +170,11 @@ def analyse(client, events):
                 fn = DISPATCH.get(b.name)
                 out = fn(**b.input) if fn else f"unknown tool {b.name}"
                 print(f"[blue] ACTION {b.name}({b.input}) -> {out}")
+                # record the action on the dashboard timeline (powers the action log + replay)
+                store.append_jsonl(store.ACTIONS_FILE, {
+                    "ts": store.now(), "kind": "action", "tool": b.name,
+                    "input": b.input, "result": out,
+                })
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
         messages.append({"role": "user", "content": results})
 
@@ -188,15 +193,24 @@ def main():
         escalate = []
         for e in candidates:
             if not USE_JEV:
+                e["_jev"] = None
+                esc = True
+            else:
+                v = classify_request(e)
+                e["_jev"] = v
+                esc = bool(v.get("malicious") or v.get("error"))  # fail-safe: escalate if Jev errors
+                if esc:
+                    print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
+                          f"malicious={v.get('malicious')} type={v.get('attack_type')} "
+                          f"score={v.get('malicious_score')}", flush=True)
+            # record the triage verdict on the dashboard timeline (powers the funnel)
+            store.append_jsonl(store.ACTIONS_FILE, {
+                "ts": store.now(), "kind": "triage", "ip": e.get("ip"),
+                "method": e.get("method"), "path": e.get("path"), "query": e.get("query"),
+                "regex_hit": USE_REGEX_PREGATE, "jev": e.get("_jev"), "escalated": esc,
+            })
+            if esc:
                 escalate.append(e)
-                continue
-            v = classify_request(e)
-            e["_jev"] = v
-            if v.get("malicious") or v.get("error"):  # fail-safe: escalate if Jev errors
-                escalate.append(e)
-                print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
-                      f"malicious={v.get('malicious')} type={v.get('attack_type')} "
-                      f"score={v.get('malicious_score')}", flush=True)
         if escalate:
             print(f"[blue] {len(escalate)} confirmed-suspicious -> main agent", flush=True)
             try:

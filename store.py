@@ -14,6 +14,16 @@ DATA.mkdir(exist_ok=True)
 STATE_FILE = DATA / "state.json"
 EVENTS_FILE = DATA / "events.jsonl"
 INCIDENTS_FILE = DATA / "incidents.jsonl"
+ACTIONS_FILE = DATA / "actions.jsonl"  # unified agent timeline: triage verdicts + tool actions
+
+# Raw stdout/stderr from the container and the processes, tailed into the
+# dashboard as a live console. run.sh redirects each stream into one of these.
+LOGS = DATA / "logs"
+LOGS.mkdir(exist_ok=True)
+DVWA_LOG = LOGS / "dvwa.log"      # docker compose logs -f (DVWA + MailHog)
+PROXY_LOG = LOGS / "proxy.log"    # the reverse proxy / uvicorn
+BLUE_LOG = LOGS / "blue.log"      # the blue-team agent
+RED_LOG = LOGS / "red.log"        # the red-team agent (when run via run.sh helper)
 
 DEFAULT_STATE = {"denylist": [], "rules": [], "seen_ips": {}}
 _lock = threading.Lock()
@@ -52,6 +62,27 @@ def read_jsonl(path, limit=None):
         except json.JSONDecodeError:
             pass
     return out
+
+
+def count_lines(path):
+    p = Path(path)
+    if not p.exists():
+        return 0
+    try:
+        with open(p, "rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def tail_lines(path, n=120):
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        return p.read_text(errors="ignore").splitlines()[-n:]
+    except OSError:
+        return []
 
 
 def now():
