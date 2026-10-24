@@ -13,11 +13,20 @@ x-app: &app
       max-file: "2"
 
 services:
+  # De-fingerprinted vulnerable target (forked+mutated DVWA; see target_app/ and MUTATION.md).
+  # Service name kept as `dvwa` on purpose: it is internal-only (Docker DNS), never seen by the
+  # attacker/model, so renaming it would churn actuator/log/compose refs for zero de-fingerprint gain.
   dvwa:
-    image: vulnerables/web-dvwa
+    build:
+      context: ./target_app
+    image: bastion-target
     logging: *runtime-logging
+    environment:
+      # Empty seed => fresh per-boot mutation. Set BASTION_SEED to pin a reproducible instance.
+      BASTION_SEED: "${BASTION_SEED:-}"
+      APP_LEVEL: "${APP_LEVEL:-medium}"
     healthcheck:
-      test: ["CMD", "bash", "-c", "php -r 'exit(file_get_contents(\"http://127.0.0.1/login.php\")===false?1:0);'"]
+      test: ["CMD", "bash", "-c", "php -r 'exit(@file_get_contents(\"http://127.0.0.1/\")===false?1:0);'"]
       interval: 10s
       timeout: 5s
       retries: 12

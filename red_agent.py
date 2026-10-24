@@ -21,20 +21,40 @@ MODEL = llm.model_for(os.getenv("RED_MODEL"), "claude-opus-4-5")
 # Optional artificial pacing between requests. Default 0 — realism comes from the
 # attacker having to recon/discover (many requests over real time), not a fake delay.
 REQUEST_DELAY = float(os.getenv("RED_REQUEST_DELAY", "0"))
-# DVWA stores its security level per session; the attacker's fresh session pins it to the
-# app's deployed setting. A mechanic of the target, not part of the exploit.
-DVWA_SECURITY = os.getenv("DVWA_SECURITY", "medium")
 
 # An external attacker who just found the app: a bare, UNAUTHENTICATED session.
 session = httpx.Client(base_url=PROXY, headers={"X-Forwarded-For": ATTACKER_IP},
                        follow_redirects=True, timeout=20)
 
-_TOK = re.compile(r"user_token'?\s*value=['\"]([0-9a-f]+)['\"]", re.I)
+_INPUT = re.compile(r"<input\b[^>]*>", re.I)
+_ATTR = re.compile(r"""(\w[\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
+_ACTION = re.compile(r"<form\b[^>]*\baction\s*=\s*['\"]([^'\"]*)['\"]", re.I)
 
 
-def _token(html):
-    match = _TOK.search(html)
-    return match.group(1) if match else ""
+def _attrs(tag):
+    return {m.group(1).lower(): (m.group(2) or m.group(3) or m.group(4) or "")
+            for m in _ATTR.finditer(tag)}
+
+
+def _parse_login_form(html, fallback_action):
+    """Generically read a login form: find the text (username) and password fields and
+    carry through every hidden field (CSRF token, submit flags) exactly as served. Works
+    against any app regardless of the renamed field names — a real attacker fills by role."""
+    action = (_ACTION.search(html).group(1) if _ACTION.search(html) else "") or fallback_action
+    user_field = pwd_field = None
+    hidden = {}
+    for tag in _INPUT.findall(html):
+        a = _attrs(tag)
+        typ, name = a.get("type", "text").lower(), a.get("name")
+        if not name:
+            continue
+        if typ == "password" and pwd_field is None:
+            pwd_field = name
+        elif typ == "hidden":
+            hidden[name] = a.get("value", "")
+        elif typ in ("text", "email", "") and user_field is None:
+            user_field = name
+    return {"action": action, "user_field": user_field, "pwd_field": pwd_field, "hidden": hidden}
 
 
 _S = {"type": "string", "maxLength": 512}
@@ -49,13 +69,17 @@ TOOLS = [
                                      "body": {"type": "object", "additionalProperties": {"type": "string"}}},
                       "required": ["method", "path"]}},
     {"name": "authenticate",
-     "description": "Attempt to log in with credentials (handles the login form + CSRF token). "
-                    "Use after you find a login page; you start with no session. Try common "
-                    "defaults first. Returns whether access was gained.",
+     "description": "Submit the login form at `path` with the given credentials. Automatically "
+                    "reads the form's field names and carries through any CSRF/hidden token. "
+                    "Use after recon reveals a login page and you have obtained credentials "
+                    "(the app is unknown — defaults will NOT be the usual ones). Returns "
+                    "whether access was gained.",
      "input_schema": {"type": "object", "additionalProperties": False,
-                      "properties": {"username": {"type": "string", "maxLength": 128},
+                      "properties": {"path": {"type": "string", "maxLength": 512,
+                                              "description": "URL of the login page you found during recon"},
+                                     "username": {"type": "string", "maxLength": 128},
                                      "password": {"type": "string", "maxLength": 128}},
-                      "required": ["username", "password"]}},
+                      "required": ["path", "username", "password"]}},
 ]
 
 GOALS = {
@@ -77,39 +101,30 @@ def http_request(method, path, params=None, body=None):
     return f"HTTP {resp.status_code}\n{text}"
 
 
-def authenticate(username, password):
-    """Attacker action: try to log in with guessed/default creds. Handles the CSRF token and
-    DVWA's session-id regeneration (pins the last PHPSESSID the server issues, which otherwise
-    leaves the session logged-out on a fresh DB). Also pins the app's per-session security
-    level to its deployed setting — a DVWA mechanic, not the exploit. Returns success/failure."""
-    issued = []
-
-    def grab(resp):
-        for raw in resp.headers.get_list("set-cookie"):
-            match = re.search(r"PHPSESSID=([^;]+)", raw)
-            if match:
-                issued.append(match.group(1))
-
-    session.event_hooks = {"response": [grab]}
+def authenticate(path, username, password):
+    """Attacker action: log in at the discovered `path`. Fetches the page, reads the form's
+    field names, carries through its CSRF/hidden token, and posts the credentials. The shared
+    httpx cookie jar follows any Set-Cookie / session regeneration across the redirect chain.
+    Success is inferred from the post-login response no longer presenting a password field."""
     try:
-        page = session.get("/login.php")
-        session.post("/login.php", data={"username": username, "password": password,
-                                         "Login": "Login", "user_token": _token(page.text)})
-        page = session.get("/security.php")
-        session.post("/security.php", data={"security": DVWA_SECURITY, "seclev_submit": "Submit",
-                                            "user_token": _token(page.text)})
+        page = session.get(path)
     except Exception as exc:
-        session.event_hooks = {"response": []}
+        return f"ERROR fetching login page {path!r}: {exc}"
+    form = _parse_login_form(page.text, path)
+    if not form["pwd_field"]:
+        return (f"No login form found at {path!r} (HTTP {page.status_code}) — recon the app "
+                f"to find the real sign-in page before authenticating.")
+    data = dict(form["hidden"])
+    data[form["user_field"] or "username"] = username
+    data[form["pwd_field"]] = password
+    try:
+        resp = session.post(form["action"], data=data)
+    except Exception as exc:
         return f"ERROR during login: {exc}"
-    session.event_hooks = {"response": []}
-    session.cookies.clear()
-    if issued:
-        session.cookies.set("PHPSESSID", issued[-1])
-    session.cookies.set("security", DVWA_SECURITY)
-    probe = session.get("/index.php")
-    ok = "Logout" in probe.text or "Welcome" in probe.text
-    return ("Authentication SUCCEEDED — you now have a session and the app is accessible."
-            if ok else f"Authentication FAILED (HTTP {probe.status_code}) — credentials rejected.")
+    ok = 'type="password"' not in resp.text and "type='password'" not in resp.text
+    tail = resp.text[-600:]
+    return (f"Authentication SUCCEEDED — you now have a session and the app is accessible.\n{tail}"
+            if ok else f"Authentication FAILED (HTTP {resp.status_code}) — credentials rejected.\n{tail}")
 
 
 DISPATCH = {"http_request": http_request, "authenticate": authenticate}
@@ -131,8 +146,10 @@ def run(target):
         "next:\n"
         "1. RECON — browse the app (start at / and /index.php); map its pages, forms, and "
         "parameters; figure out how it works and where it may be weak.\n"
-        "2. ACCESS — if it needs a login, call the 'authenticate' tool to try credentials, "
-        "starting with common defaults (e.g. admin/password). You are given no session.\n"
+        "2. ACCESS — if it needs a login, you must first OBTAIN credentials: this app is "
+        "unknown and the usual defaults will not work, but apps often leak or document "
+        "them (onboarding/help pages, comments, notices). Find them during recon, then call "
+        "the 'authenticate' tool with the login page's path and those credentials.\n"
         "3. DISCOVER — find an input that looks exploitable for your goal.\n"
         "4. EXPLOIT — probe it, read responses, refine the payload, and achieve the goal.\n\n"
         "Use http_request for all browsing and attacks. If something is blocked (403), note "
@@ -153,7 +170,7 @@ def run(target):
             if block.type == "tool_use":
                 i = block.input
                 if block.name == "authenticate":
-                    print(f"[red] -> authenticate({i.get('username')}:{i.get('password')})", flush=True)
+                    print(f"[red] -> authenticate({i.get('path')} {i.get('username')}:{i.get('password')})", flush=True)
                 else:
                     print(f"[red] -> {i.get('method')} {i.get('path')}", flush=True)
                 fn = DISPATCH.get(block.name)
