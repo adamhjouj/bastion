@@ -21,6 +21,7 @@ import statistics
 import subprocess
 import sys
 import time
+from urllib.parse import unquote_plus
 
 import classifier
 from blue_agent import is_suspicious  # the regex pre-gate (what reaches Jev)
@@ -92,10 +93,12 @@ def main():
         if scores is None:
             print(f"  API error on {r['path']}: {info}")
             continue
+        # mirror proxy.py _event(): decode query/body before the pre-gate sees them
+        dec = dict(r, query=unquote_plus(r["query"]), body=unquote_plus(r["body"]))
         results.append({"row": r, "truth": r["label"] == "malicious",
                         "scores": scores, "mean": statistics.mean(scores),
                         "std": statistics.pstdev(scores) if len(scores) > 1 else 0.0,
-                        "ptype": info, "regex": is_suspicious(r)})
+                        "ptype": info, "regex": is_suspicious(dec)})
 
     def pred(x, t=thr):
         return x["mean"] >= t
