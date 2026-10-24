@@ -63,7 +63,7 @@ SUSPICIOUS = re.compile(r"""(?ix)
     ( union\s+select | or\s+1=1 | '\s*or\s*' | \bsleep\s*\( | information_schema
     | --\s | \# | ;\s*\w | \|\| | && | \$\( | `.*` | /bin/ | /etc/passwd
     | \bcat\s | \bwhoami\b | \bnc\s | \bwget\s | \bcurl\s
-    | \.\./ | <script | onerror= | %2e%2e )
+    | \.\./ | \.\.\\ | <script | <svg | onerror= | onload\s*= | javascript: | %2e%2e )
 """)
 
 SYSTEM = (
