@@ -57,6 +57,12 @@ def patch_vuln(level="impossible", base_url=None):
                                       "user_token": token})
         c.cookies.set("security", level)
         new = _read_level(c.get("/security.php").text)
+        if new is None:
+            # In-session read-back can flake behind a proxy (a block/redirect page
+            # instead of security.php). Confirm with a fresh login — reliable.
+            fresh = _login(base)
+            new = _read_level(fresh.get("/security.php").text)
+            fresh.close()
         c.close()
     except Exception as e:
         return {"ok": False, "requested": level, "error": str(e)}
