@@ -148,8 +148,11 @@ async def proxy(path: str, request: Request):
     probe = f"{request.method} /{path}?{unquote_plus(qs)} {unquote_plus(body.decode('utf-8', 'ignore'))}"
     st, rules = get_state()
 
-    # 1. IP denylist
-    if any(d["ip"] == ip for d in st.get("denylist", [])):
+    # 1. IP denylist (skip entries whose TTL has expired — provisional reflex bans
+    #    auto-lift; a null/absent 'expires' is a permanent ban)
+    _now = store.now()
+    if any(d["ip"] == ip and (not d.get("expires") or d["expires"] > _now)
+           for d in st.get("denylist", [])):
         store.append_jsonl(store.EVENTS_FILE,
                            _event(ip, request.method, path, qs, body, 403, True, "denylist"))
         return JSONResponse({"error": "blocked",

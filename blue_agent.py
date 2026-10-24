@@ -9,6 +9,7 @@ import smtplib
 import sys
 import time
 from email.message import EmailMessage
+from urllib.parse import parse_qs, unquote_plus
 
 import anthropic
 
@@ -32,6 +33,16 @@ USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAF
 USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
 # Jev's verdict drives the WAF directly (fast reflex, no Claude needed).
 JEV_AUTOBLOCK = os.environ.get("JEV_AUTOBLOCK", "1") == "1"
+# Two-tier band (the project's thesis: agent reasons, not a bare score->ban):
+#   score >= AUTOBLOCK_HIGH  -> unambiguous attack, instant reflex block (the live 403)
+#   THRESHOLD <= score < HIGH -> ambiguous, escalate to the agent to INVESTIGATE & decide
+# A pure threshold->ban is exactly a commodity WAF; the ambiguous band is where the
+# agent earns its keep (and clears false positives like a legit ?ip=127.0.0.1 ping).
+AUTOBLOCK_HIGH = float(os.environ.get("AUTOBLOCK_HIGH", "0.9"))
+# Reflex bans are provisional: the IP ban is cheap-to-reverse (one attacker, not a
+# class-wide rule), so it carries a short TTL and auto-lifts. If the agent confirms
+# the attack it re-bans durably; if it was a false flag, the ban expires on its own.
+AUTOBLOCK_TTL_MIN = int(os.environ.get("AUTOBLOCK_TTL_MIN", "15"))
 # Claude (system-2) is optional enrichment; on only if an Anthropic key is present.
 USE_CLAUDE = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
@@ -60,7 +71,15 @@ SYSTEM = (
     "receive recent HTTP requests captured at a reverse proxy in front of the app. "
     "Decide whether any request is a real attack. Known classes: SQL injection, "
     "command injection, path traversal, XSS.\n\n"
-    "For each distinct attacker you are confident about:\n"
+    "The Jev system-1 classifier already flagged these as SUSPICIOUS, but it is "
+    "twitchy and advisory — a flag is a reason to LOOK, not proof of an attack. "
+    "Before acting on any request you are not certain about, call inspect_target "
+    "to get read-only structural evidence (decoded params, path-escape check, "
+    "shell/SQL/XSS tokens, whether the endpoint is real). If that evidence shows the "
+    "request is benign (e.g. a bare host like ip=127.0.0.1 with no shell metacharacters, "
+    "or a file param that stays inside its directory), reply 'no threat' and take NO "
+    "action — do not blacklist or add a rule. Only act on a confirmed attack.\n\n"
+    "For each distinct attacker you CONFIRM is malicious:\n"
     "1. call blacklist_ip on the source IP;\n"
     "2. call add_waf_rule with a TIGHT regex that blocks that specific exploit "
     "pattern (match the payload tokens, e.g. 'union\\s+select' or ';\\s*cat', NOT "
@@ -70,6 +89,11 @@ SYSTEM = (
     "4. if patch_vuln is available and containment alone is insufficient, call it "
     "to raise the app's security posture (real eradication beyond the WAF). Note "
     "it hardens the whole app, so reserve it for a confirmed, serious exploit.\n\n"
+    "Some source IPs may already carry a PROVISIONAL short-TTL ban from the system-1 "
+    "reflex (an 'expires' timestamp in the denylist). That ban is reversible and auto-"
+    "lifts. If you CONFIRM the attack, call blacklist_ip again (no expiry) to make it "
+    "durable and add the tight WAF rule. If investigation shows it was benign, do NOT "
+    "re-ban or add a rule — say 'no threat' and let the provisional ban expire on its own.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -89,6 +113,18 @@ TOOLS = [
                       "properties": {"pattern": {"type": "string"},
                                      "description": {"type": "string"}},
                       "required": ["pattern", "description"]}},
+    {"name": "inspect_target",
+     "description": "Read-only investigation of a flagged request. Returns structural "
+                    "evidence (url-decoded params, whether a file/path param escapes its "
+                    "directory, presence of shell/SQL/XSS tokens, whether the endpoint is "
+                    "a real app endpoint). Does NOT re-send or execute the request. Use it "
+                    "to confirm or clear a suspicious request before acting.",
+     "input_schema": {"type": "object",
+                      "properties": {"method": {"type": "string"},
+                                     "path": {"type": "string"},
+                                     "query": {"type": "string"},
+                                     "body": {"type": "string"}},
+                      "required": ["path"]}},
     {"name": "raise_alert",
      "description": "Email a human-readable incident report and record the incident.",
      "input_schema": {"type": "object",
@@ -111,12 +147,25 @@ def is_suspicious(ev):
 
 # ---- tool implementations ----
 
-def do_blacklist_ip(ip, reason):
+def do_blacklist_ip(ip, reason, expires=None):
+    """Ban an IP. expires=None is a durable ban (agent-confirmed); an ISO timestamp is
+    a provisional TTL ban (system-1 reflex). Re-banning only STRENGTHENS: a durable ban
+    overrides a TTL, and a later TTL overrides an earlier one — never weakens."""
     st = store.load_state()
-    if not any(d["ip"] == ip for d in st["denylist"]):
-        st["denylist"].append({"ip": ip, "reason": reason, "ts": store.now()})
+    existing = next((d for d in st["denylist"] if d["ip"] == ip), None)
+    if existing is None:
+        st["denylist"].append({"ip": ip, "reason": reason, "ts": store.now(),
+                               "expires": expires})
         store.save_state(st)
-    return f"IP {ip} blacklisted."
+    else:
+        cur = existing.get("expires")
+        if expires is None and cur is not None:          # TTL -> durable (agent confirmed)
+            existing.update({"expires": None, "reason": reason})
+            store.save_state(st)
+        elif expires is not None and cur is not None and expires > cur:  # extend TTL
+            existing["expires"] = expires
+            store.save_state(st)
+    return f"IP {ip} blacklisted." + (f" (expires {expires})" if expires else "")
 
 
 def do_add_waf_rule(pattern, description):
@@ -131,6 +180,45 @@ def do_add_waf_rule(pattern, description):
     return f"WAF rule added: {description}"
 
 
+# Real DVWA endpoints (from the vulnerables/web-dvwa image) — a request to anything
+# outside this set is itself a weak signal (scanning / unexpected path).
+KNOWN_ENDPOINTS = {
+    "/login.php", "/index.php", "/security.php", "/instructions.php", "/setup.php",
+    "/logout.php", "/about.php", "/phpinfo.php", "/ids_log.php",
+    "/vulnerabilities/sqli/", "/vulnerabilities/sqli_blind/", "/vulnerabilities/exec/",
+    "/vulnerabilities/fi/", "/vulnerabilities/xss_r/", "/vulnerabilities/xss_s/",
+    "/vulnerabilities/xss_d/", "/vulnerabilities/csrf/", "/vulnerabilities/brute/",
+    "/vulnerabilities/upload/", "/vulnerabilities/captcha/", "/vulnerabilities/csp/",
+    "/vulnerabilities/javascript/",
+}
+# NB: bare '&' is HTTP form-param syntax (ip=x&Submit=y), NOT a shell op — exclude it;
+# '&&' (real chained command) stays as an explicit alternative.
+_SHELL_META = re.compile(r"[;|`]|\$\(|\|\||&&|>")
+_SQL_TOK = re.compile(r"(?i)union\s+select|\bor\s+1\s*=\s*1|'\s*or\s*'|information_schema|--\s|\bsleep\s*\(")
+_XSS_TOK = re.compile(r"(?i)<script|onerror\s*=|onload\s*=|javascript:")
+
+
+def do_inspect_target(path, method="GET", query="", body=""):
+    """Read-only structural evidence for the agent to judge a flagged request.
+    Derives facts; never re-sends or executes anything (the proxy already ran it)."""
+    params = {k: v[0] for k, v in
+              parse_qs(unquote_plus(query) + "&" + unquote_plus(body)).items()}
+    blob = " ".join([unquote_plus(query), unquote_plus(body)])
+    ev = {"known_endpoint": path in KNOWN_ENDPOINTS,
+          "shell_metachars": bool(_SHELL_META.search(blob)),
+          "sql_tokens": bool(_SQL_TOK.search(blob)),
+          "xss_tokens": bool(_XSS_TOK.search(blob)),
+          "decoded_params": params}
+    # File-inclusion / traversal check: does a path-like param escape its directory?
+    for k, val in params.items():
+        if "/" in val or ".." in val or "\\" in val:
+            norm = os.path.normpath(val.replace("\\", "/"))
+            ev["path_param"] = {"name": k, "value": val, "normalized": norm,
+                                "escapes_dir": norm.startswith("..") or norm.startswith("/")}
+            break
+    return json.dumps(ev)
+
+
 def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
     inc = {"ts": store.now(), "severity": severity, "attack_type": attack_type,
            "source_ip": source_ip, "evidence": evidence, "summary": summary}
@@ -140,7 +228,7 @@ def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
 
 
 DISPATCH = {"blacklist_ip": do_blacklist_ip, "add_waf_rule": do_add_waf_rule,
-            "raise_alert": do_raise_alert}
+            "raise_alert": do_raise_alert, "inspect_target": do_inspect_target}
 
 # Register eradication tools (patch_vuln, and future lock_egress/kill_session/…).
 # Each REGISTER entry is {"name", "schema", "fn"}; accepts a single dict or a list.
@@ -180,30 +268,39 @@ def record_triage(e, escalated, outcome):
     })
 
 
-def autoblock(event, verdict):
-    """Jev-driven WAF enforcement — no LLM. Ban the IP, add the canned virtual
-    patch for the attack type, and alert. This is 'Jev in the WAF'."""
+def autoblock(event, verdict, defer_rule=False):
+    """System-1 reflex containment — no LLM. Bans the source IP with a short TTL
+    (reversible; scoped to one attacker). The durable, class-wide WAF rule is the
+    high-blast-radius action, so it is DEFERRED to the agent (defer_rule=True). Only
+    when there is no agent to defer to does the reflex also add the canned rule + email
+    and own the full incident itself."""
     ip = event["ip"]
     atk = verdict["attack_type"]
     score = verdict.get("malicious_score") or 0.0
     evidence = f"{event.get('method')} {event.get('path')}?{event.get('query', '')} {event.get('body', '')}".strip()
-    reason = f"Jev-confirmed {atk} (score {score:.2f})"
-    r1 = do_blacklist_ip(ip, reason)
-    record_action("blacklist_ip", {"ip": ip, "reason": reason}, r1)
+    expires = store.now_plus(AUTOBLOCK_TTL_MIN * 60)
+    reason = f"Jev-flagged {atk} ({score:.2f}); provisional {AUTOBLOCK_TTL_MIN}m ban"
+    r1 = do_blacklist_ip(ip, reason, expires=expires)
+    record_action("blacklist_ip", {"ip": ip, "reason": reason, "expires": expires}, r1)
+    if defer_rule:
+        print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> provisional "
+              f"{AUTOBLOCK_TTL_MIN}m IP ban; durable WAF rule deferred to agent", flush=True)
+        return
+    # No agent available: the reflex is the whole responder (contain + canned patch + alert).
     actions = [r1]
     rule = CANNED_WAF.get(atk)
     if rule:
-        desc = f"auto: block {atk} (Jev)"
+        desc = f"auto: block {atk} (Jev, no-agent fallback)"
         r2 = do_add_waf_rule(rule, desc)
         record_action("add_waf_rule", {"pattern": rule, "description": desc}, r2)
         actions.append(r2)
     sev = "critical" if score >= 0.9 else "high"
-    summary = "Jev system-1 confirmed attack; " + "; ".join(actions)
+    summary = "Jev system-1 (no agent) contained attack; " + "; ".join(actions)
     r3 = do_raise_alert(sev, atk, ip, evidence, summary)
     record_action("raise_alert", {"severity": sev, "attack_type": atk, "source_ip": ip,
                                    "evidence": evidence, "summary": summary}, r3)
-    print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> banned + "
-          f"{'WAF rule + ' if rule else ''}email", flush=True)
+    print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> {AUTOBLOCK_TTL_MIN}m IP ban + "
+          f"{'canned WAF rule + ' if rule else ''}email (no agent)", flush=True)
 
 
 def send_email(inc):
@@ -305,14 +402,23 @@ def main():
             if not v.get("malicious"):             # Jev says benign -> drop
                 record_triage(e, escalated=False, outcome="benign")
                 continue
+            score = v.get("malicious_score") or 0.0
             print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
-                  f"{v['attack_type']} ({v['malicious_score']:.2f})", flush=True)
-            if JEV_AUTOBLOCK:
-                autoblock(e, v)                    # Jev drives the WAF directly
-                record_triage(e, escalated=True, outcome="autoblock")
+                  f"{v['attack_type']} ({score:.2f})", flush=True)
+            if JEV_AUTOBLOCK and score >= AUTOBLOCK_HIGH:
+                # unambiguous -> instant reversible IP containment (live 403) now...
+                autoblock(e, v, defer_rule=USE_CLAUDE)
+                if USE_CLAUDE:
+                    to_claude.append(e)            # ...agent owns durable rule + incident
+                    record_triage(e, escalated=True, outcome="autoblock+claude")
+                else:
+                    record_triage(e, escalated=True, outcome="autoblock")
             elif USE_CLAUDE:
-                to_claude.append(e)
+                to_claude.append(e)                # ambiguous band -> agent investigates
                 record_triage(e, escalated=True, outcome="claude")
+            elif JEV_AUTOBLOCK:
+                autoblock(e, v, defer_rule=False)  # no agent -> fail safe: full reflex responder
+                record_triage(e, escalated=True, outcome="autoblock_fallback")
             else:
                 record_triage(e, escalated=False, outcome="no_engine")
         if to_claude and client is not None:

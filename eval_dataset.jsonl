@@ -23,16 +23,19 @@
 {"method":"GET","path":"/vulnerabilities/fi/","query":"page=..\\..\\..\\windows\\win.ini","body":"","label":"malicious","type":"path_traversal","note":"windows traversal"}
 {"method":"GET","path":"/login.php","query":"","body":"","label":"benign","type":"benign","note":"plain page"}
 {"method":"GET","path":"/index.php","query":"","body":"","label":"benign","type":"benign","note":"home"}
-{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1&Submit=Submit","body":"","label":"benign","type":"benign","note":"legit lookup"}
+{"method":"GET","path":"/security.php","query":"","body":"","label":"benign","type":"benign","note":"normal nav: security level page"}
+{"method":"GET","path":"/instructions.php","query":"","body":"","label":"benign","type":"benign","note":"normal nav: instructions page"}
+{"method":"GET","path":"/vulnerabilities/sqli/","query":"id=1&Submit=Submit","body":"","label":"benign","type":"benign","note":"legit lookup on sqli endpoint"}
 {"method":"GET","path":"/vulnerabilities/sqli/","query":"id=42","body":"","label":"benign","type":"benign","note":"legit numeric id"}
-{"method":"GET","path":"/vulnerabilities/fi/","query":"page=include.php","body":"","label":"benign","type":"benign","note":"legit include"}
-{"method":"POST","path":"/guestbook.php","query":"","body":"name=Alice&message=Hello there, great site!","label":"benign","type":"benign","note":"normal comment"}
-{"method":"GET","path":"/search.php","query":"q=laptop deals","body":"","label":"benign","type":"benign","note":"normal search"}
-{"method":"POST","path":"/guestbook.php","query":"","body":"name=O'Brien&message=thanks","label":"benign","type":"benign","note":"HARD: apostrophe in a real name"}
-{"method":"GET","path":"/search.php","query":"q=union meeting schedule","body":"","label":"benign","type":"benign","note":"HARD: the word union"}
-{"method":"POST","path":"/guestbook.php","query":"","body":"name=Sam&message=I love my cat; she is so cute","label":"benign","type":"benign","note":"HARD: semicolon + cat"}
-{"method":"GET","path":"/search.php","query":"q=please select a date for the meeting","body":"","label":"benign","type":"benign","note":"HARD: the word select"}
-{"method":"GET","path":"/search.php","query":"q=drop by the office anytime","body":"","label":"benign","type":"benign","note":"HARD: the word drop"}
-{"method":"POST","path":"/guestbook.php","query":"","body":"name=Dan&message=check the script for act 1 of the play","label":"benign","type":"benign","note":"HARD: the word script"}
-{"method":"GET","path":"/search.php","query":"q=SELECT the best option from the list","body":"","label":"benign","type":"benign","note":"HARD: SELECT ... from in English"}
-{"method":"POST","path":"/guestbook.php","query":"","body":"name=<3&message=love this","label":"benign","type":"benign","note":"HARD: <3 is not a tag"}
+{"method":"GET","path":"/vulnerabilities/fi/","query":"page=include.php","body":"","label":"benign","type":"benign","note":"legit include (real DVWA default file)"}
+{"method":"POST","path":"/vulnerabilities/exec/","query":"","body":"ip=127.0.0.1&Submit=Submit","label":"benign","type":"benign","note":"HARD: legit ping on the cmdi endpoint (classic FP trap)"}
+{"method":"GET","path":"/vulnerabilities/xss_r/","query":"name=John","body":"","label":"benign","type":"benign","note":"legit name on the xss endpoint"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Alice&mtxMessage=Hello there, great site!&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"normal guestbook comment (real xss_s)"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=O'Brien&mtxMessage=thanks&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: apostrophe in a real name"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Sam&mtxMessage=I love my cat; she is so cute&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: semicolon + cat"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Dan&mtxMessage=check the script for act 1 of the play&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: the word script"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=<3&mtxMessage=love this site&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: <3 is not a tag"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Lee&mtxMessage=our union meeting is friday&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: the word union"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Amy&mtxMessage=please select a date for the meeting&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: the word select"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Ravi&mtxMessage=drop by the office anytime&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: the word drop"}
+{"method":"POST","path":"/vulnerabilities/xss_s/","query":"","body":"txtName=Joe&mtxMessage=SELECT the best option from the list&btnSign=Sign+Guestbook","label":"benign","type":"benign","note":"HARD: SELECT ... from in English"}

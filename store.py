@@ -87,3 +87,8 @@ def tail_lines(path, n=120):
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def now_plus(seconds):
+    # ISO timestamp `seconds` from now (lexicographically comparable to now()).
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
