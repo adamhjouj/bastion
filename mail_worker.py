@@ -32,26 +32,34 @@ def main(argv=None):
     # Import after loading env so the store sees the configured data directory.
     import store
     try:
-        test_incident = {"ts": store.now(), "case_id": "test-" + uuid.uuid4().hex,
-                         "severity": "info", "attack_type": "notification_test",
-                         "source_ip": "not applicable", "evidence": "Synthetic notification test; no exploit or attack was run.",
-                         "summary": "Bastion alert delivery is connected. This test passed through the durable outbox and configured email provider."}
-        prepared = prepare_message(test_incident)
-        validate_config()
-        if args.check:
-            print(f"Email configuration valid: provider={prepared['provider']}, recipients={len(prepared['to'])}. No email sent; DNS/key permissions not verified.")
-            return 0
-        store.initialize()
-        if args.test:
-            key = test_incident["case_id"]
-            store.queue_mail(key, test_incident)
-            result = store.deliver_mail(send_email, key=key)
+        # --check/--test are diagnostics: fail fast and report. The continuous
+        # daemon (no flags, what docker-compose runs) must never gate startup on
+        # this; a missing/bad key is handled per-message in the loop below so one
+        # bad .env value can't crash-loop the container (store.deliver_mail already
+        # retries/dead-letters there without raising).
+        if args.check or args.test:
+            test_incident = {"ts": store.now(), "case_id": "test-" + uuid.uuid4().hex,
+                             "severity": "info", "attack_type": "notification_test",
+                             "source_ip": "not applicable", "evidence": "Synthetic notification test; no exploit or attack was run.",
+                             "summary": "Bastion alert delivery is connected. This test passed through the durable outbox and configured email provider."}
+            prepared = prepare_message(test_incident)
+            key = validate_config()
+            provider = "resend" if key else "local (no RESEND_API_KEY; alerts land in local_mail.jsonl and stdout)"
+            if args.check:
+                print(f"Email configuration valid: provider={provider}, recipients={len(prepared['to'])}. No email sent; DNS/key permissions not verified.")
+                return 0
+            store.initialize()
+            case_id = test_incident["case_id"]
+            store.queue_mail(case_id, test_incident)
+            result = store.deliver_mail(send_email, key=case_id)
             print(json.dumps(result))
             if result and result["status"] == "accepted":
                 print("Accepted by the mail provider. Check your inbox/spam folder and the provider's email log; inbox delivery is not yet confirmed.")
                 return 0
             return 1
-        print("Mail worker started; waiting for queued Resend notifications", flush=True)
+        store.initialize()
+        mode = "Resend" if os.getenv("RESEND_API_KEY", "").strip() else "local fallback (no RESEND_API_KEY; alerts logged to local_mail.jsonl and stdout)"
+        print(f"Mail worker started in {mode} mode; waiting for queued notifications", flush=True)
         stop = threading.Event()
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
