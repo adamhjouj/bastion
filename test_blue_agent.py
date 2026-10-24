@@ -115,6 +115,8 @@ def test_execute_tool_unknown():
 
 
 def test_execute_tool_idempotent():
+    store.append_jsonl(store.ACTIONS_FILE, {"kind": "triage", "ip": "192.0.2.10", "path": "/x",
+                       "jev": {"malicious": True, "malicious_score": 0.97}})
     r1 = agent.execute_tool("blacklist_ip", {"ip": "192.0.2.10", "reason": "test"}, "case3")
     r2 = agent.execute_tool("blacklist_ip", {"ip": "192.0.2.10", "reason": "test"}, "case3")
     assert r1 == r2
@@ -122,6 +124,8 @@ def test_execute_tool_idempotent():
 
 
 def test_agent_loop_calls_tool():
+    store.append_jsonl(store.ACTIONS_FILE, {"kind": "triage", "ip": "192.0.2.11", "path": "/x",
+                       "jev": {"malicious": True, "malicious_score": 0.95}})
     client = StubClient([[("blacklist_ip", {"ip": "192.0.2.11", "reason": "confirmed"})], []])
     event = store.enqueue_event({"ip": "192.0.2.11", "path": "/x", "method": "GET",
                                  "query": "", "body": "", "ts": store.now()})
@@ -205,3 +209,32 @@ def test_process_batch_observe_mode():
     # Event is consumed without any bans.
     assert not store.load_state()["denylist"]
     assert store.claim_events() == []
+
+
+# --- containment guard: never ban/divert a source the classifier scored benign ---
+def test_containment_refused_for_classifier_benign_source():
+    import store, blue_agent
+    store.append_jsonl(store.ACTIONS_FILE, {"kind": "triage", "ip": "198.51.100.50", "path": "/p",
+                       "jev": {"malicious": False, "malicious_score": 0.02}})
+    r = blue_agent.execute_tool("divert_to_honeypot",
+                                {"ip": "198.51.100.50", "reason": "looks like a campaign"}, "c1")
+    assert r.startswith("REJECTED")
+    assert "198.51.100.50" not in [d["ip"] for d in store.load_state().get("honeypot", [])]
+
+
+def test_containment_allowed_for_classifier_malicious_source():
+    import store, blue_agent
+    store.append_jsonl(store.ACTIONS_FILE, {"kind": "triage", "ip": "203.0.113.9", "path": "/p",
+                       "jev": {"malicious": True, "malicious_score": 0.98}})
+    r = blue_agent.execute_tool("blacklist_ip", {"ip": "203.0.113.9", "reason": "confirmed sqli"}, "c2")
+    assert not r.startswith("REJECTED")
+    assert "203.0.113.9" in [d["ip"] for d in store.load_state().get("denylist", [])]
+
+
+def test_containment_refused_when_classifier_has_no_verdict():
+    import store, blue_agent
+    # no malicious verdict on record (classifier hasn't judged this source) -> containment refused,
+    # which also closes the timing hole where the agent sees a not-yet-classified benign request.
+    r = blue_agent.execute_tool("blacklist_ip", {"ip": "203.0.113.10", "reason": "manual"}, "c3")
+    assert r.startswith("REJECTED")
+    assert "203.0.113.10" not in [d["ip"] for d in store.load_state().get("denylist", [])]
