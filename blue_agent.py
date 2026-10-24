@@ -15,6 +15,11 @@ import anthropic
 import store
 from classifier import classify_request
 
+try:  # eradication tools live in a sibling module; keep the agent runnable without them
+    from remediation_tools import REGISTER as REMEDIATION_REGISTER
+except Exception:
+    REMEDIATION_REGISTER = None
+
 MODEL = os.environ.get("BLUE_MODEL", "claude-sonnet-5")
 POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
@@ -54,7 +59,10 @@ SYSTEM = (
     "pattern (match the payload tokens, e.g. 'union\\s+select' or ';\\s*cat', NOT "
     "broad patterns that would block normal traffic);\n"
     "3. call raise_alert with concrete evidence and a one-line summary of what "
-    "happened and what you did.\n\n"
+    "happened and what you did.\n"
+    "4. if patch_vuln is available and containment alone is insufficient, call it "
+    "to raise the app's security posture (real eradication beyond the WAF). Note "
+    "it hardens the whole app, so reserve it for a confirmed, serious exploit.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -126,6 +134,14 @@ def do_raise_alert(severity, attack_type, source_ip, evidence, summary):
 
 DISPATCH = {"blacklist_ip": do_blacklist_ip, "add_waf_rule": do_add_waf_rule,
             "raise_alert": do_raise_alert}
+
+# Register eradication tools (patch_vuln, and future lock_egress/kill_session/…).
+# Each REGISTER entry is {"name", "schema", "fn"}; accepts a single dict or a list.
+if REMEDIATION_REGISTER:
+    for _reg in (REMEDIATION_REGISTER if isinstance(REMEDIATION_REGISTER, list)
+                 else [REMEDIATION_REGISTER]):
+        TOOLS.append(_reg["schema"])
+        DISPATCH[_reg["name"]] = _reg["fn"]
 
 
 def autoblock(event, verdict):

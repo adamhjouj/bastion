@@ -23,6 +23,7 @@ services:
     environment:
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
+      DVWA_URL: http://dvwa:80  # patch_vuln (remediation) talks directly to DVWA
     volumes: ["bastion-data:/app/data"]
     depends_on: [proxy, mailhog]
     restart: unless-stopped
