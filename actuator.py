@@ -104,25 +104,22 @@ def _pos_int(v):
 
 
 def _pids(cid):
-    """[(pid:int, cmd:str)] for the container. Parses `docker top` (cols:
-    UID PID PPID C STIME TTY TIME CMD; CMD may contain spaces)."""
-    rc, out, err = _docker("top", cid)
+    """[(pid:int, cmd:str)] for the container, read from INSIDE the container's
+    PID namespace. Must match the namespace `docker exec kill` acts in — `docker
+    top` reports HOST pids (different numbers under a VM/rosetta), so killing a
+    top-reported pid fails or hits the wrong in-container process. `ps -eo
+    pid=,args=` suppresses the header; busybox (no -eo) falls back to plain ps."""
+    rc, out, err = _docker("exec", cid, "ps", "-eo", "pid=,args=")
     if rc != 0:
-        raise Rejected(f"docker top failed: {err.strip() or rc}")
-    lines = out.splitlines()
-    if not lines:
-        return []
-    hdr = lines[0].split()
-    try:
-        pi, ci = hdr.index("PID"), hdr.index("CMD")
-    except ValueError:
-        pi, ci = 1, len(hdr) - 1
+        rc, out, err = _docker("exec", cid, "ps")  # busybox fallback
+        if rc != 0:
+            raise Rejected(f"ps in {cid} failed: {err.strip() or rc}")
     rows = []
-    for ln in lines[1:]:
-        cols = ln.split(None, len(hdr) - 1)
-        if len(cols) <= max(pi, ci) or not cols[pi].isdigit():
+    for ln in out.splitlines():
+        parts = ln.split(None, 1)
+        if not parts or not parts[0].isdigit():  # skips any header / blank line
             continue
-        rows.append((int(cols[pi]), cols[ci]))
+        rows.append((int(parts[0]), parts[1].strip() if len(parts) > 1 else ""))
     return rows
 
 
@@ -398,10 +395,8 @@ def _selftest():
         a = " ".join(args)
         if args[0] == "ps":
             return (0, "fakecid\n", "") if "service=dvwa" in a or "service=proxy" in a else (0, "", "")
-        if args[0] == "top":
-            tbl = "UID PID PPID C STIME TTY TIME CMD\n" + "".join(
-                f"root {p} 1 0 00:00 ? 00:00:00 proc{p}\n" for p in fake["pids"])
-            return (0, tbl, "")
+        if args[0] == "exec" and "ps" in args:  # _pids reads container-ns `ps`
+            return (0, "".join(f"{p} proc{p}\n" for p in fake["pids"]), "")
         if args[0] == "inspect":
             return (0, "breach-agent_default \n", "")
         if args[0] == "exec" and "ls" in a:
