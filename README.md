@@ -3,11 +3,9 @@
 <!-- PROJECT SHIELDS -->
 <div align="center">
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
 [![MIT License][license-shield]][license-url]
+![Python][python-shield]
+![Status][status-shield]
 
 </div>
 
@@ -233,16 +231,10 @@ Project Link: [https://github.com/adamhjouj/bastion](https://github.com/adamhjou
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- MARKDOWN LINKS & BADGES -->
-[contributors-shield]: https://img.shields.io/github/contributors/adamhjouj/bastion.svg?style=for-the-badge&cacheSeconds=60
-[contributors-url]: https://github.com/adamhjouj/bastion/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/adamhjouj/bastion.svg?style=for-the-badge&cacheSeconds=60
-[forks-url]: https://github.com/adamhjouj/bastion/network/members
-[stars-shield]: https://img.shields.io/github/stars/adamhjouj/bastion.svg?style=for-the-badge&cacheSeconds=60
-[stars-url]: https://github.com/adamhjouj/bastion/stargazers
-[issues-shield]: https://img.shields.io/github/issues/adamhjouj/bastion.svg?style=for-the-badge&cacheSeconds=60
-[issues-url]: https://github.com/adamhjouj/bastion/issues
-[license-shield]: https://img.shields.io/github/license/adamhjouj/bastion.svg?style=for-the-badge&cacheSeconds=60
+[license-shield]: https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge
 [license-url]: https://github.com/adamhjouj/bastion/blob/main/LICENSE
+[python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
+[status-shield]: https://img.shields.io/badge/status-demo-orange.svg?style=for-the-badge
 
 [Python-badge]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
 [Python-url]: https://www.python.org/
