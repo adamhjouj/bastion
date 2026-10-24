@@ -8,13 +8,12 @@ Usage: python3 red_agent.py sqli    # or: cmdi
 import os
 import sys
 
-import anthropic
-
+import llm
 from bootstrap_dvwa import authed_session
 
 PROXY = os.environ.get("PROXY_URL", "http://localhost:8080")
 ATTACKER_IP = os.environ.get("ATTACKER_IP", "10.13.37.7")
-MODEL = os.environ.get("RED_MODEL", "claude-opus-5")
+MODEL = llm.model_for(os.environ.get("RED_MODEL"), "claude-opus-5")
 
 session = authed_session(PROXY, xff=ATTACKER_IP)
 
@@ -51,15 +50,17 @@ def http_request(method, path, params=None, body=None):
 
 
 def run(target):
-    client = anthropic.Anthropic()
+    client, create_kwargs = llm.make_client()
+    if client is None:
+        sys.exit("set DEEPSEEK_API_KEY or ANTHROPIC_API_KEY to run the red agent")
     system = ("You are an authorized red-team operator in a sandboxed lab (DVWA). You "
               "already have an authenticated session — just use the http_request tool. "
               "Only touch the endpoint named in the objective. Work iteratively: send "
               "a request, read the response, refine the payload. " + OBJECTIVES[target])
     messages = [{"role": "user", "content": f"Begin. Objective: {target}"}]
     for _ in range(25):
-        resp = client.messages.create(model=MODEL, max_tokens=8000,
-                                      system=system, tools=TOOL, messages=messages)
+        resp = client.messages.create(model=MODEL, max_tokens=8000, system=system,
+                                      tools=TOOL, messages=messages, **create_kwargs)
         messages.append({"role": "assistant", "content": resp.content})
         for b in resp.content:
             if b.type == "text" and b.text.strip():

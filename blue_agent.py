@@ -11,8 +11,7 @@ import time
 from email.message import EmailMessage
 from urllib.parse import parse_qs, unquote_plus
 
-import anthropic
-
+import llm
 import store
 from classifier import classify_request
 
@@ -26,7 +25,16 @@ try:  # control-plane actions (kill_session/egress/quarantine); LLM stays unpriv
 except Exception:
     CONTROL_REGISTER = None
 
-MODEL = os.environ.get("BLUE_MODEL", "claude-sonnet-5")
+try:  # soft containment: divert a confirmed attacker to a decoy instead of a hard ban
+    from honeypot_tools import REGISTER as HONEYPOT_REGISTER
+except Exception:
+    HONEYPOT_REGISTER = None
+
+# Read-only situational-awareness tools + the tool catalog/environment briefing the
+# agent is taught in its system prompt (see tools.py).
+from tools import ORIENT_REGISTER, catalog, ENVIRONMENT
+
+MODEL = llm.model_for(os.environ.get("BLUE_MODEL"), "claude-sonnet-5")
 POLL = 1.0
 # System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
 USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
@@ -43,8 +51,14 @@ AUTOBLOCK_HIGH = float(os.environ.get("AUTOBLOCK_HIGH", "0.9"))
 # class-wide rule), so it carries a short TTL and auto-lifts. If the agent confirms
 # the attack it re-bans durably; if it was a false flag, the ban expires on its own.
 AUTOBLOCK_TTL_MIN = int(os.environ.get("AUTOBLOCK_TTL_MIN", "15"))
-# Claude (system-2) is optional enrichment; on only if an Anthropic key is present.
-USE_CLAUDE = bool(os.environ.get("ANTHROPIC_API_KEY"))
+# What the high-confidence reflex DOES: "ban" (default) = contain via the TTL IP ban;
+# "divert" = deception-first — also route the IP to the honeypot decoy from request #1
+# (no 403 tip-off, instant TTP harvest), with the TTL ban kept as a backstop. 'divert'
+# needs honeypot_tools present + the proxy's HONEYPOT_URL set, else it degrades to 'ban'.
+AUTOBLOCK_MODE = os.environ.get("AUTOBLOCK_MODE", "ban")
+# The LLM agent (system-2) is optional enrichment; on if an Anthropic OR DeepSeek
+# key is present (see llm.py for provider selection).
+USE_AGENT = llm.provider() is not None
 
 # Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
 CANNED_WAF = {
@@ -94,6 +108,11 @@ SYSTEM = (
     "lifts. If you CONFIRM the attack, call blacklist_ip again (no expiry) to make it "
     "durable and add the tight WAF rule. If investigation shows it was benign, do NOT "
     "re-ban or add a rule — say 'no threat' and let the provisional ban expire on its own.\n\n"
+    "Soft-containment alternative: if divert_to_honeypot is available and you want to "
+    "harvest the attacker's techniques or buy a remediation window rather than ban "
+    "immediately, call divert_to_honeypot(ip) to silently route them to a decoy (a hard "
+    "ban tips them off; a divert does not). undivert(ip) reverses it — use it to release "
+    "a false positive.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -249,6 +268,35 @@ if CONTROL_REGISTER:
         DISPATCH[_reg["name"]] = _reg["fn"]
         _have.add(_reg["name"])
 
+# Honeypot divert tools (divert_to_honeypot / undivert), same {name,schema,fn} hook.
+if HONEYPOT_REGISTER:
+    _have = {t["name"] for t in TOOLS}
+    for _reg in HONEYPOT_REGISTER:
+        if _reg["name"] in _have:
+            continue
+        TOOLS.append(_reg["schema"])
+        DISPATCH[_reg["name"]] = _reg["fn"]
+        _have.add(_reg["name"])
+
+# Read-only orientation tools (get_defenses / recent_requests / recent_incidents /
+# service_status), same {name,schema,fn} hook — so the agent can SEE its environment.
+_have = {t["name"] for t in TOOLS}
+for _reg in ORIENT_REGISTER:
+    if _reg["name"] in _have:
+        continue
+    TOOLS.append(_reg["schema"])
+    DISPATCH[_reg["name"]] = _reg["fn"]
+    _have.add(_reg["name"])
+
+# Teach the agent its environment + the full, live tool set (every registered tool,
+# grouped by purpose) by prepending them to the doctrine above. Generated from TOOLS,
+# so a newly registered tool is taught automatically — the agent is never blind to a
+# tool it can call.
+SYSTEM = (ENVIRONMENT
+          + "\n\nYOUR TOOLS — call them by exact name (orient with the read-only ones "
+            "before you act):\n" + catalog(TOOLS)
+          + "\n\n--- OPERATING DOCTRINE ---\n" + SYSTEM)
+
 
 def record_action(tool, inp, result):
     # mirror every executed action onto the dashboard timeline (actions.jsonl),
@@ -282,6 +330,14 @@ def autoblock(event, verdict, defer_rule=False):
     reason = f"Jev-flagged {atk} ({score:.2f}); provisional {AUTOBLOCK_TTL_MIN}m ban"
     r1 = do_blacklist_ip(ip, reason, expires=expires)
     record_action("blacklist_ip", {"ip": ip, "reason": reason, "expires": expires}, r1)
+    # Deception-first: also divert to the decoy so the attacker is fooled from request #1.
+    # Honeypot precedence (in the proxy) routes them to the decoy; the TTL ban is the
+    # backstop that applies the instant the divert is lifted. Degrades to plain ban if the
+    # honeypot tool isn't registered.
+    if AUTOBLOCK_MODE == "divert" and "divert_to_honeypot" in DISPATCH:
+        dreason = f"auto-divert: Jev {atk} ({score:.2f})"
+        rd = DISPATCH["divert_to_honeypot"](ip=ip, reason=dreason)
+        record_action("divert_to_honeypot", {"ip": ip, "reason": dreason}, rd)
     if defer_rule:
         print(f"[blue] AUTOBLOCK {ip} ({atk}, {score:.2f}) -> provisional "
               f"{AUTOBLOCK_TTL_MIN}m IP ban; durable WAF rule deferred to agent", flush=True)
@@ -330,7 +386,8 @@ def send_email(inc):
         print(f"[blue] email send failed: {e}", file=sys.stderr)
 
 
-def analyse(client, events):
+def analyse(client, events, create_kwargs=None):
+    create_kwargs = create_kwargs or {}
     st = store.load_state()
     payload = []
     for e in events:
@@ -347,7 +404,7 @@ def analyse(client, events):
     while True:
         resp = client.messages.create(
             model=MODEL, max_tokens=4096, system=SYSTEM, tools=TOOLS,
-            output_config={"effort": "low"}, messages=messages)
+            messages=messages, **create_kwargs)
         if resp.stop_reason != "tool_use":
             break
         messages.append({"role": "assistant", "content": resp.content})
@@ -363,13 +420,14 @@ def analyse(client, events):
 
 
 def main():
-    client = anthropic.Anthropic() if USE_CLAUDE else None
+    client, create_kwargs = llm.make_client()
+    agent_label = llm.provider() or "agent"
     mode = "+".join(m for m, on in (("regex", USE_REGEX_PREGATE), ("Jev", USE_JEV),
                                     ("autoblock", JEV_AUTOBLOCK and USE_JEV),
-                                    ("Claude", USE_CLAUDE)) if on) or "none"
+                                    (agent_label, USE_AGENT)) if on) or "none"
     print(f"[blue] watching {store.EVENTS_FILE}; pipeline: {mode}", flush=True)
-    if not USE_JEV and not USE_CLAUDE:
-        print("[blue] WARNING: no decision engine (no Jev key, no Anthropic key)",
+    if not USE_JEV and not USE_AGENT:
+        print("[blue] WARNING: no decision engine (no Jev key, no agent key)",
               file=sys.stderr, flush=True)
     offset = len(store.read_jsonl(store.EVENTS_FILE))  # skip pre-existing lines
     while True:
@@ -382,7 +440,7 @@ def main():
         for e in candidates:
             if not USE_JEV:
                 e["_jev"] = None
-                if USE_CLAUDE:
+                if USE_AGENT:
                     to_claude.append(e)
                     record_triage(e, escalated=True, outcome="claude")
                 else:
@@ -393,7 +451,7 @@ def main():
             if v.get("error"):                     # couldn't classify -> Claude if available
                 print(f"[blue] jev error ({e['ip']} {e['path']}): {v['error']}",
                       file=sys.stderr, flush=True)
-                if USE_CLAUDE:
+                if USE_AGENT:
                     to_claude.append(e)
                     record_triage(e, escalated=True, outcome="claude")
                 else:
@@ -407,13 +465,13 @@ def main():
                   f"{v['attack_type']} ({score:.2f})", flush=True)
             if JEV_AUTOBLOCK and score >= AUTOBLOCK_HIGH:
                 # unambiguous -> instant reversible IP containment (live 403) now...
-                autoblock(e, v, defer_rule=USE_CLAUDE)
-                if USE_CLAUDE:
+                autoblock(e, v, defer_rule=USE_AGENT)
+                if USE_AGENT:
                     to_claude.append(e)            # ...agent owns durable rule + incident
                     record_triage(e, escalated=True, outcome="autoblock+claude")
                 else:
                     record_triage(e, escalated=True, outcome="autoblock")
-            elif USE_CLAUDE:
+            elif USE_AGENT:
                 to_claude.append(e)                # ambiguous band -> agent investigates
                 record_triage(e, escalated=True, outcome="claude")
             elif JEV_AUTOBLOCK:
@@ -422,9 +480,9 @@ def main():
             else:
                 record_triage(e, escalated=False, outcome="no_engine")
         if to_claude and client is not None:
-            print(f"[blue] {len(to_claude)} -> Claude (system-2)", flush=True)
+            print(f"[blue] {len(to_claude)} -> {agent_label} (system-2)", flush=True)
             try:
-                analyse(client, to_claude)
+                analyse(client, to_claude, create_kwargs)
             except Exception as ex:
                 print(f"[blue] analyse error: {ex}", file=sys.stderr, flush=True)
         time.sleep(POLL)
