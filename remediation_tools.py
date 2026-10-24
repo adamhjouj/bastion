@@ -91,7 +91,8 @@ def patch_vuln(level="impossible", base_url=None):
     if ok:
         # Record the enforced level so the proxy pins it (closes the cookie bypass).
         try:
-            store.save_state(_apply_enforcement(store.load_state(), level))
+            with store.state_lock:  # swarm-safe read-modify-write
+                store.save_state(_apply_enforcement(store.load_state(), level))
         except Exception:
             pass  # enforcement is best-effort; the raise itself already succeeded
     return {"ok": ok, "level": new, "requested": level, "verified": new is not None}

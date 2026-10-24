@@ -13,6 +13,10 @@ services:
     environment:
       DVWA_URL: http://dvwa:80
       HONEYPOT_URL: http://honeypot:9000   # diverted IPs land here instead of DVWA
+      # Per-IP flood/brute-force cap (rate_limit.py). Tune here; no secrets in the proxy.
+      RATE_LIMIT_MAX: "100"                 # max requests per window, per source IP
+      RATE_LIMIT_WINDOW: "10"               # sliding window, seconds
+      RATE_LIMIT_ENABLED: "1"               # 0 disables
     ports: ["8080:8080"]
     volumes: ["bastion-data:/app/data"]
     depends_on: [dvwa, honeypot]

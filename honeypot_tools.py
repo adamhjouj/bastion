@@ -19,25 +19,30 @@ import store
 
 def divert_to_honeypot(ip, reason):
     """Idempotent: route `ip` to the decoy. Appends once; re-diverting is a no-op."""
-    st = store.load_state()
-    hp = st.setdefault("honeypot", [])
-    if not any(d["ip"] == ip for d in hp):
-        hp.append({"ip": ip, "reason": reason, "ts": store.now()})
-        store.save_state(st)
+    with store.state_lock:  # swarm-safe read-modify-write
+        st = store.load_state()
+        hp = st.setdefault("honeypot", [])
+        if not any(d["ip"] == ip for d in hp):
+            hp.append({"ip": ip, "reason": reason, "ts": store.now()})
+            store.save_state(st)
     return (f"{ip} diverted to honeypot ({reason}) — now routed to the decoy "
             f"instead of the real app.")
 
 
 def undivert(ip):
     """Release `ip` from the honeypot (symmetry): stop diverting, route it normally again."""
-    st = store.load_state()
-    hp = st.setdefault("honeypot", [])
-    kept = [d for d in hp if d["ip"] != ip]
-    if len(kept) != len(hp):
-        st["honeypot"] = kept
-        store.save_state(st)
-        return f"{ip} released from honeypot — requests route to the real app again."
-    return f"{ip} was not diverted; nothing to release."
+    with store.state_lock:  # swarm-safe read-modify-write
+        st = store.load_state()
+        hp = st.setdefault("honeypot", [])
+        kept = [d for d in hp if d["ip"] != ip]
+        if len(kept) != len(hp):
+            st["honeypot"] = kept
+            store.save_state(st)
+            released = True
+        else:
+            released = False
+    return (f"{ip} released from honeypot — requests route to the real app again."
+            if released else f"{ip} was not diverted; nothing to release.")
 
 
 def do_divert_to_honeypot(ip, reason, **_):

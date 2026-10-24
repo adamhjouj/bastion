@@ -145,19 +145,26 @@ def catalog(schemas):
             continue
         lines.append(title + ":")
         for n in present:
-            lines.append(f"  - {n}: {_one_line(by_name[n])}")
+            lines.append(f"  - {n}: {_tag(by_name[n])}")
             placed.add(n)
         lines.append("")
     other = [n for n in by_name if n not in placed]
     if other:
         lines.append("OTHER:")
         for n in other:
-            lines.append(f"  - {n}: {_one_line(by_name[n])}")
+            lines.append(f"  - {n}: {_tag(by_name[n])}")
     return "\n".join(lines).rstrip()
 
 
-def _one_line(desc, limit=200):
+def _tag(desc, limit=72):
+    """Short purpose tag for the catalog. The FULL description is already sent in the
+    tool schema, so the catalog only needs grouping + a one-glance tag — this keeps the
+    system prompt lean (no duplicated paragraphs). Takes the first sentence, drops the
+    'Read-only.' prefix (the group title already says it), and caps length."""
     d = " ".join(desc.split())
+    if d.startswith("Read-only."):
+        d = d[len("Read-only."):].strip()
+    d = d.split(". ", 1)[0].rstrip(".")       # first sentence/clause only
     return d if len(d) <= limit else d[:limit - 1].rstrip() + "…"
 
 

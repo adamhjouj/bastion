@@ -26,7 +26,12 @@ BLUE_LOG = LOGS / "blue.log"      # the blue-team agent
 RED_LOG = LOGS / "red.log"        # the red-team agent (when run via run.sh helper)
 
 DEFAULT_STATE = {"denylist": [], "rules": [], "seen_ips": {}}
-_lock = threading.Lock()
+_lock = threading.Lock()         # serializes append_jsonl writes
+# Serializes the read-modify-write of state.json. Concurrent defenders (the swarm) each
+# do load_state() -> mutate -> save_state(); without this they clobber each other's
+# denylist/rule/divert updates (lost-update race). Hold it ONLY around a load->save pair,
+# never while also taking _lock, so the two locks never nest. See store.save_state note.
+state_lock = threading.Lock()
 
 
 def load_state():

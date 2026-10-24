@@ -8,6 +8,7 @@ import re
 import smtplib
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from urllib.parse import parse_qs, unquote_plus
 
@@ -57,6 +58,9 @@ AUTOBLOCK_TTL_MIN = int(os.environ.get("AUTOBLOCK_TTL_MIN", "15"))
 # The LLM agent (system-2) is optional enrichment; on if an Anthropic OR DeepSeek
 # key is present (see llm.py for provider selection).
 USE_AGENT = llm.provider() is not None
+# Swarm: max concurrent defenders (one per distinct attacker IP) per poll. Caps spend/
+# rate under a flood; attackers beyond the cap wait their turn in the pool queue.
+SWARM_MAX = int(os.environ.get("SWARM_MAX", "4"))
 
 # Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
 CANNED_WAF = {
@@ -114,6 +118,22 @@ SYSTEM = (
     "immediately, call divert_to_honeypot(ip) to silently route them to a decoy (a hard "
     "ban tips them off; a divert does not). undivert(ip) reverses it — use it to release "
     "a false positive.\n\n"
+    "RESPONSE PLAYBOOK — match the situation to the right tool, don't stop at ban+rule:\n"
+    "- Recon/probing you want to study -> divert_to_honeypot to harvest TTPs; undivert to release.\n"
+    "- SQLi / XSS / path traversal (payload-pattern attacks) -> blacklist_ip + a TIGHT add_waf_rule; "
+    "patch_vuln if the hole is serious.\n"
+    "- Command injection / RCE -> besides the WAF rule, call list_processes on the target and "
+    "kill_process any [NEW] (non-baseline) pid (e.g. a reverse shell), and isolate_egress to cut "
+    "C2 / data exfil / second-stage payload pulls.\n"
+    "- Confirmed credential exposure (SQLi dumped creds, config/file read, secrets read via RCE) -> "
+    "rotate_secret so stolen DB credentials are instantly useless.\n"
+    "- Authenticated or agentic attacker, or one rotating source IPs -> kill_session (an IP ban won't "
+    "help; the source IP is client-asserted and spoofable); prefer a class-wide add_waf_rule over an IP ban.\n"
+    "- Active, ongoing, high-severity compromise you cannot otherwise contain -> quarantine_container "
+    "(freezes the target); release_container once safe. Nuclear, last resort.\n"
+    "Orient before acting: get_defenses (what you already enforce; never duplicate it), recent_requests "
+    "(is this IP still probing / is it a flood), service_status (is the target already quarantined). "
+    "Act proportionally to the confirmed severity, then stop.\n\n"
     "If traffic is benign, do nothing and reply 'no threat'. Never duplicate an "
     "action already listed in current defenses. Be decisive."
 )
@@ -171,20 +191,21 @@ def do_blacklist_ip(ip, reason, expires=None):
     """Ban an IP. expires=None is a durable ban (agent-confirmed); an ISO timestamp is
     a provisional TTL ban (system-1 reflex). Re-banning only STRENGTHENS: a durable ban
     overrides a TTL, and a later TTL overrides an earlier one — never weakens."""
-    st = store.load_state()
-    existing = next((d for d in st["denylist"] if d["ip"] == ip), None)
-    if existing is None:
-        st["denylist"].append({"ip": ip, "reason": reason, "ts": store.now(),
-                               "expires": expires})
-        store.save_state(st)
-    else:
-        cur = existing.get("expires")
-        if expires is None and cur is not None:          # TTL -> durable (agent confirmed)
-            existing.update({"expires": None, "reason": reason})
+    with store.state_lock:  # serialize read-modify-write so concurrent defenders don't clobber
+        st = store.load_state()
+        existing = next((d for d in st["denylist"] if d["ip"] == ip), None)
+        if existing is None:
+            st["denylist"].append({"ip": ip, "reason": reason, "ts": store.now(),
+                                   "expires": expires})
             store.save_state(st)
-        elif expires is not None and cur is not None and expires > cur:  # extend TTL
-            existing["expires"] = expires
-            store.save_state(st)
+        else:
+            cur = existing.get("expires")
+            if expires is None and cur is not None:          # TTL -> durable (agent confirmed)
+                existing.update({"expires": None, "reason": reason})
+                store.save_state(st)
+            elif expires is not None and cur is not None and expires > cur:  # extend TTL
+                existing["expires"] = expires
+                store.save_state(st)
     return f"IP {ip} blacklisted." + (f" (expires {expires})" if expires else "")
 
 
@@ -193,10 +214,11 @@ def do_add_waf_rule(pattern, description):
         re.compile(pattern)
     except re.error as e:
         return f"Invalid regex, not added: {e}"
-    st = store.load_state()
-    if not any(r["pattern"] == pattern for r in st["rules"]):
-        st["rules"].append({"pattern": pattern, "description": description, "ts": store.now()})
-        store.save_state(st)
+    with store.state_lock:  # serialize read-modify-write (swarm-safe)
+        st = store.load_state()
+        if not any(r["pattern"] == pattern for r in st["rules"]):
+            st["rules"].append({"pattern": pattern, "description": description, "ts": store.now()})
+            store.save_state(st)
     return f"WAF rule added: {description}"
 
 
@@ -423,6 +445,38 @@ def analyse(client, events, create_kwargs=None):
         messages.append({"role": "user", "content": results})
 
 
+def _dedupe(events):
+    """Collapse identical (ip, method, path, query, body) requests to one representative,
+    so a flood of the same payload becomes ONE case instead of N agent calls. Keeps the
+    first occurrence (it carries that request's Jev verdict)."""
+    seen = {}
+    for e in events:
+        key = (e.get("ip"), e.get("method"), e.get("path"), e.get("query"), e.get("body"))
+        seen.setdefault(key, e)
+    return list(seen.values())
+
+
+def dispatch_swarm(client, events, create_kwargs):
+    """Fan out ONE concurrent defender per distinct attacker IP (bounded by SWARM_MAX),
+    each running its own analyse() tool-use loop focused on that IP — so swarms of attackers
+    get swarms of defenders instead of one serialized batch. Per-IP requests are deduped
+    first; all state writes are store.state_lock-guarded so concurrent bans/rules/diverts
+    don't clobber each other. Waits for the poll's defenders to finish before returning."""
+    by_ip = {}
+    for e in _dedupe(events):
+        by_ip.setdefault(e.get("ip"), []).append(e)
+    print(f"[blue] swarm: {len(by_ip)} attacker IP(s) -> "
+          f"{min(len(by_ip), SWARM_MAX)} concurrent defenders (cap {SWARM_MAX})", flush=True)
+    with ThreadPoolExecutor(max_workers=SWARM_MAX) as pool:
+        futs = {pool.submit(analyse, client, evs, create_kwargs): ip
+                for ip, evs in by_ip.items()}
+        for fut in as_completed(futs):
+            try:
+                fut.result()
+            except Exception as ex:
+                print(f"[blue] defender {futs[fut]} error: {ex}", file=sys.stderr, flush=True)
+
+
 def main():
     client, create_kwargs = llm.make_client()
     agent_label = llm.provider() or "agent"
@@ -480,11 +534,11 @@ def main():
             else:
                 record_triage(e, escalated=False, outcome="no_engine")
         if to_claude and client is not None:
-            print(f"[blue] {len(to_claude)} -> {agent_label} (system-2)", flush=True)
+            print(f"[blue] {len(to_claude)} flagged -> {agent_label} swarm (system-2)", flush=True)
             try:
-                analyse(client, to_claude, create_kwargs)
+                dispatch_swarm(client, to_claude, create_kwargs)
             except Exception as ex:
-                print(f"[blue] analyse error: {ex}", file=sys.stderr, flush=True)
+                print(f"[blue] swarm error: {ex}", file=sys.stderr, flush=True)
         time.sleep(POLL)
 
 

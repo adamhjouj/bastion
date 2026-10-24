@@ -17,6 +17,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
+import rate_limit
 import store
 
 DVWA_URL = os.environ.get("DVWA_URL", "http://localhost:80")
@@ -193,6 +194,16 @@ async def proxy(path: str, request: Request):
         return JSONResponse({"error": "blocked",
                              "reason": "source IP blacklisted by blue-team agent"},
                             status_code=403)
+
+    # 1.5 Per-IP rate limit — flood / brute-force / scrape cap, BEFORE the WAF loop so a
+    #     burst is shed cheaply (no regex scan, no agent call). Diverted + banned IPs were
+    #     already handled above. Disabled → always passes (RATE_LIMIT_ENABLED=0).
+    if rate_limit.limited(ip):
+        store.append_jsonl(store.EVENTS_FILE,
+                           _event(ip, request.method, path, qs, body, 429, True, "rate_limit"))
+        return JSONResponse({"error": "rate_limited", "reason": "too many requests"},
+                            status_code=429,
+                            headers={"Retry-After": str(rate_limit.retry_after())})
 
     # 2. WAF rules (virtual patch)
     for rx, desc in rules:
