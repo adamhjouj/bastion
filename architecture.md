@@ -19,11 +19,14 @@ enforcement point**. The blue agent tails that log through a tiered triage:
 
 1. a free **regex pre-gate** drops obvious benign traffic;
 2. a system-1 classifier (**TypeSafe Jev**) scores the rest malicious/benign + attack type;
-3. a **two-tier decision** — an unambiguous hit (score ≥ `AUTOBLOCK_HIGH`) gets an
-   instant but **provisional** reflex ban (the live `403`); the ambiguous band
-   (`MALICIOUS_THRESHOLD` ≤ score < `AUTOBLOCK_HIGH`) escalates to the **LLM agent**,
-   which investigates with read-only tools and calls action tools to contain, patch,
-   eradicate, divert, and alert.
+3. **Jev only flags; the agent decides.** Every flagged request is handed to the
+   **LLM agent**, which investigates with read-only tools and calls action tools to
+   contain, patch, eradicate, divert, and alert. Jev has no authority to block — a
+   bare score→ban is just a worse Cloudflare. Two opt-in/insurance exceptions: with
+   `JEV_AUTOBLOCK=1` a very-high-confidence hit (score ≥ `AUTOBLOCK_HIGH`) also gets an
+   instant **reversible divert** to the decoy while the agent still owns the decision;
+   and with **no agent key at all**, Jev contains on its own (provisional TTL ban +
+   canned rule) because nothing else can.
 
 Re-running the same attack then returns `403`. A scoped red-team agent discovers
 and exploits one named vulnerability through the proxy, so the blue side sees real
@@ -52,9 +55,10 @@ score→ban WAF — the reasoning the raw score lacks."*
           │                                ▼
           │        ┌───────────────────────────────────────────────────────────────┐
           │        │                     blue_agent.py (loop)                        │
-          │        │  regex pre-gate → Jev (classifier.py) → score:                  │
-          │        │     ≥ AUTOBLOCK_HIGH   → autoblock(): provisional TTL IP ban     │
-          │        │     ambiguous band     → analyse(): LLM agent (llm.py)           │
+          │        │  regex pre-gate → Jev (classifier.py) FLAGS →                   │
+          │        │     every flag → analyse(): the LLM agent (llm.py) DECIDES       │
+          │        │     opt-in ≥AUTOBLOCK_HIGH: +reflex_divert to decoy (reversible) │
+          │        │     no agent key → autoblock() fallback: TTL ban + canned rule   │
           │        │  agent: inspect_target · orient (tools.py) · act (tools below)   │
           │        └───────────────┬───────────────────────────────────────────────┘
           │     ┌───────────────┬──┴────────────┬──────────────┬───────────────┬──────────────┐
@@ -101,7 +105,7 @@ Per-request logic, **in this order**:
    (`blocked:false`), *never* a `403`. A block would tip the attacker off; a silent
    divert keeps the TTP harvest going. `undivert` first to actually cut them off.
 1. **IP denylist** (TTL-aware) — a hit `403`s, **unless** its `expires` has passed
-   (provisional reflex bans auto-lift; a null/absent `expires` is permanent).
+   (provisional bans auto-lift; a null/absent `expires` is permanent).
 2. **WAF rules** — each compiled regex tested against the decoded `probe`; first match `403`s.
 3. **Forward** — hop-by-hop headers stripped both ways; `Accept-Encoding: identity`
    upstream (fixes the gzip double-decode bug and keeps responses plaintext). If
@@ -113,23 +117,25 @@ matchable); forwarding uses the **original** bytes. Rule compilation is mtime-ca
 blue-agent write takes effect within one request, no restart.
 `# ponytail`: trusts `X-Forwarded-For` for the demo's distinct attacker IP — never in prod.
 
-### `blue_agent.py` 🔑  — detection & two-tier response loop
+### `blue_agent.py` 🔑  — detection loop: Jev flags, the agent decides
 Standalone process (keeps slow LLM calls out of the request path).
 - **`main()`** polls `events.jsonl` every 1s from the current end. For each candidate
   (not already blocked, survives the regex pre-gate):
   - `USE_JEV` off → straight to the agent (if a key is set).
   - Jev **error** → fail-safe escalate to the agent.
   - Jev **benign** → drop.
-  - Jev **malicious, score ≥ `AUTOBLOCK_HIGH`** (default 0.9) → `autoblock()` now, and if an
-    agent is present, also escalate so the agent owns the durable rule + incident.
-  - Jev **malicious, ambiguous band** → escalate to the agent to investigate.
-  - No agent available → Jev autoblock is the full responder (fail safe).
+  - Jev **malicious** → hand to the agent. **Every** flag escalates regardless of score —
+    Jev flags, the agent decides. (If `JEV_AUTOBLOCK=1` and score ≥ `AUTOBLOCK_HIGH`, a
+    reversible `reflex_divert()` fires first, but the agent is still handed the case.)
+  - No agent available → `autoblock()` is the fallback responder (the one case Jev enforces).
   - Every candidate writes one `record_triage()` row (powers the dashboard funnel).
-- **`autoblock(event, verdict, defer_rule)`** — system-1 reflex, no LLM. Bans the IP with a
-  short TTL (`AUTOBLOCK_TTL_MIN`, reversible, one attacker). The durable class-wide WAF rule
-  is high-blast-radius, so it is **deferred to the agent** when one exists; only with no
-  agent does the reflex also add the canned rule + email. In `AUTOBLOCK_MODE=divert` it also
-  diverts the IP to the decoy from request #1 (TTL ban as backstop).
+- **`reflex_divert(event, verdict)`** — the *only* agent-present reflex, opt-in via
+  `JEV_AUTOBLOCK=1`: on a very-high-confidence flag it silently **diverts** the IP to the decoy
+  as a reversible holding action (no ban, no rule, no email) while the agent still decides.
+  No-op if no honeypot tool is registered.
+- **`autoblock(event, verdict)`** — **no-agent fallback only.** With no LLM key, Jev contains on
+  its own: provisional TTL IP ban (`AUTOBLOCK_TTL_MIN`) + canned WAF rule + email. When an agent
+  is present it owns all enforcement and this is never called.
 - **`do_blacklist_ip(ip, reason, expires)`** — `expires=None` is durable; an ISO timestamp is
   provisional. Re-banning only **strengthens** (TTL→durable on agent confirm; never weakens).
 - **`do_inspect_target(path, method, query, body)`** — read-only structural evidence for the
@@ -140,8 +146,9 @@ Standalone process (keeps slow LLM calls out of the request path).
   every executed tool onto `actions.jsonl`.
 - **System prompt** is assembled at import: `tools.ENVIRONMENT` (the standing briefing) +
   `tools.catalog(TOOLS)` (the **live** tool set, grouped by purpose, generated from the
-  registered tools) + the operating doctrine (investigate before acting; provisional-ban
-  semantics; divert vs. ban; no duplicate actions).
+  registered tools) + the operating doctrine (**you are the sole decision-maker, Jev only
+  flags**; investigate before acting; a high-confidence flag may already be diverted to the
+  decoy; divert vs. ban; no duplicate actions).
 - **Regex pre-gate** `SUSPICIOUS` now covers `<svg`, `onload=`, `javascript:`, and backslash
   traversal `..\` in addition to the original tokens — so XSS/traversal variants reach Jev.
 - Email via `smtplib` (MailHog by default; STARTTLS + login with real creds). Mail failures
@@ -164,7 +171,7 @@ Anthropic or DeepSeek's Anthropic-compatible endpoint, chosen by whichever key i
 - **`provider()`** → `"deepseek"` (wins if `DEEPSEEK_API_KEY` is set) | `"anthropic"` | `None`.
 - **`make_client()`** → `(client, create_kwargs)`. DeepSeek: `base_url=https://api.deepseek.com/anthropic`,
   no extra kwargs. Anthropic: native, `output_config={"effort":"low"}` (which DeepSeek rejects).
-  No key → `(None, {})` and the blue agent falls back to Jev autoblock.
+  No key → `(None, {})` and the blue agent falls back to Jev-only containment (`autoblock()`).
 - **`model_for(env_override, default)`** — resolves the model per provider (a stale `claude-*`
   default in `.env` is ignored on DeepSeek, so the example `.env` works with just a key added).
 
@@ -178,7 +185,7 @@ Makes the agent **understand** its environment, not just react.
   prompt, so a newly registered tool is taught automatically — the agent is never blind to a
   tool it can call.
 - **`ENVIRONMENT`** — the standing briefing (topology, proxy = sensor + enforcement, Jev may
-  have pre-placed a provisional ban, "a flag is a reason to look, not proof").
+  have pre-placed a reversible divert, "a flag is a reason to look, not proof").
 
 ### `remediation_tools.py` 🔑  — real eradication (`patch_vuln`) + enforced security
 Beyond a WAF band-aid: **`patch_vuln(level)`** raises DVWA's security level so the exploited
@@ -244,8 +251,8 @@ diverts + pinned level), an **exploit-replay** panel, and the **streamed contain
 - `requirements.txt` — `anthropic`, `fastapi`, `uvicorn[standard]`, `httpx` (DeepSeek reuses the
   anthropic SDK; Jev is raw REST — no extra deps).
 - `.env.example` — provider keys (DeepSeek/Anthropic), Jev key, SMTP, model names. **Note:** the
-  newer tuning knobs (`AUTOBLOCK_HIGH`, `AUTOBLOCK_TTL_MIN`, `AUTOBLOCK_MODE`, `HONEYPOT_URL`,
-  `RATE_LIMIT_*`) have sensible code defaults and are not all listed there yet.
+  newer tuning knobs (`AUTOBLOCK_HIGH`, `AUTOBLOCK_TTL_MIN`, `HONEYPOT_URL`, `RATE_LIMIT_*`)
+  have sensible code defaults and are not all listed there yet.
 
 ---
 
@@ -275,7 +282,9 @@ drives the funnel + timeline), `honeypot_hits.jsonl` (decoy TTP capture), `logs/
 2. Proxy: honeypot divert? → denylist (TTL-aware)? → WAF? → forward (pinning the security cookie
    if enforced), logging the real status. SSE pushes the change to the dashboard.
 3. Blue agent reads new events, pre-filters, and classifies with Jev.
-4. Score ≥ `AUTOBLOCK_HIGH` → provisional TTL ban now; ambiguous → agent investigates.
+4. Jev flags → the agent is handed the case (every flag, any score). Opt-in: a ≥`AUTOBLOCK_HIGH`
+   flag also gets a reversible reflex divert to the decoy first; with no agent key, `autoblock()`
+   contains instead.
 5. The agent orients (read-only tools), calls `inspect_target`, and either confirms (durable
    re-ban + tight WAF rule + alert, optionally eradicate/divert/control-plane) or clears it.
 6. State mutations take effect at step 2 on the next matching request. Provisional bans auto-lift;
@@ -289,8 +298,8 @@ drives the funnel + timeline), `honeypot_hits.jsonl` (decoy TTP capture), `logs/
 - Proxy data plane: benign→`200`, denylisted IP→`403`, `UNION SELECT` from a fresh IP→`403`,
   URL-encoded payloads decode and match, gzip double-decode fixed, honeypot divert returns the
   decoy page logged as `diverted`, TTL bans expire, enforced-security cookie pinning.
-- Jev autoblock end to end (with `TYPESAFE_API_KEY`): all five classes flagged 0.91–0.99 →
-  provisional ban (+ canned rule/email with no agent).
+- Jev no-agent fallback end to end (with `TYPESAFE_API_KEY`, no agent key): all five classes
+  flagged 0.91–0.99 → `autoblock()` provisional TTL ban + canned rule + email.
 - **Test suite** (host, `.venv`): `test_pipeline` (regex → stubbed-LLM dispatch → state + incident
   + real MailHog email), `test_remediation`, `test_inspect`, `test_ban_ttl`, `test_enforce_cookie`,
   `test_honeypot_{app,tools,e2e}`, `test_rate_limit` + `test_rate_limit_e2e`, and `actuator._selftest`.
@@ -311,8 +320,8 @@ proxy hook not yet added.
 ## 7. How to run — fully dockerized
 
 The whole stack runs in Docker: DVWA + honeypot + MailHog + reverse-proxy/WAF + blue agent. **No
-agent key is required** — the blue agent defends via Jev autoblock; add a key to enable the
-system-2 agent and the red agent.
+agent key is required** — with no key the blue agent falls back to Jev-only containment; add a
+key to enable the system-2 agent (the default, intended path) and the red agent.
 
 ```bash
 cd ~/breach-agent
@@ -325,9 +334,10 @@ curl -H 'X-Forwarded-For: 10.13.37.7' \
 # re-run -> 403.  Dashboard: http://localhost:8080/__dashboard   MailHog: http://localhost:8025
 ```
 
-**Decision modes** (`blue_agent.py`, env-tunable): `JEV_AUTOBLOCK` + `AUTOBLOCK_HIGH` set the
-reflex/escalate split; `AUTOBLOCK_TTL_MIN` the provisional-ban lifetime; `AUTOBLOCK_MODE=divert`
-switches the high-confidence reflex to deception-first. `USE_REGEX_PREGATE=0` sends all traffic to
+**Decision modes** (`blue_agent.py`, env-tunable): by default Jev only flags and the agent decides
+everything (`JEV_AUTOBLOCK=0`). `JEV_AUTOBLOCK=1` enables insurance — a reversible reflex divert at
+score ≥ `AUTOBLOCK_HIGH` when an agent is present, and full Jev-only containment when no agent key is
+set; `AUTOBLOCK_TTL_MIN` sets the fallback-ban lifetime. `USE_REGEX_PREGATE=0` sends all traffic to
 Jev. Models: `BLUE_MODEL` / `RED_MODEL` (Anthropic) or `DEEPSEEK_MODEL` (DeepSeek).
 
 ---
@@ -335,11 +345,11 @@ Jev. Models: `BLUE_MODEL` / `RED_MODEL` (Anthropic) or `DEEPSEEK_MODEL` (DeepSee
 ## 8. Demo script
 1. Dashboard up, quiet; the funnel and consoles streaming.
 2. `red_agent.py sqli` → feed lights up red as it probes and finds the injection (or just curl it).
-3. Blue fires: Jev flags → (high score) provisional ban now, agent confirms → durable ban + tight
-   WAF rule + **email in MailHog**; or (ambiguous) the agent investigates and clears/confirms.
+3. Blue fires: Jev flags → the **agent** investigates (orients, `inspect_target`), then acts —
+   durable ban + tight WAF rule + **email in MailHog** on a confirmed attack, or clears a false flag.
 4. Re-run the same attack → **403, blocked**. "Same exploit, now dead."
-5. Show breadth: command-injection + XSS classes; `AUTOBLOCK_MODE=divert` to send an attacker to
-   the decoy and show `honeypot_hits.jsonl`; `patch_vuln` raising the app's posture; `rotate_secret`.
+5. Show breadth: command-injection + XSS classes; the agent calling `divert_to_honeypot` to send an
+   attacker to the decoy (show `honeypot_hits.jsonl`); `patch_vuln` raising the app's posture; `rotate_secret`.
 
 ---
 
