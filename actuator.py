@@ -28,6 +28,7 @@ tools + handlers to the existing Claude tool-use loop in one line.
 """
 import os
 import re
+import secrets
 import subprocess
 import sys
 
@@ -43,6 +44,9 @@ ACTIONS_FILE = store.DATA / "actions.jsonl"
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9,._-]{1,128}")   # php session id charset
 _NET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_DB_USER_RE = re.compile(r"db_user'\s*\]\s*=\s*'([^']+)'")      # DVWA config.inc.php
+_DB_PASS_RE = re.compile(r"db_password'\s*\]\s*=\s*'([^']*)'")
+_DB_IDENT = re.compile(r"[A-Za-z0-9_]{1,32}")                   # db usernames we'll touch
 
 _BASELINE = {}   # target -> frozenset(pid) captured at boot (before any attack)
 
@@ -225,6 +229,62 @@ def release_container(target):
     return f"{target} released (unpaused)"
 
 
+def rotate_secret(target):
+    """Rotate the target app's DATABASE password so credentials an attacker stole
+    (RCE, SQLi exfil, or reading the config) are immediately useless. Sets a fresh
+    random password on the DB account via the container's local root socket, updates
+    the app config to match, and verifies the OLD password is now rejected and the
+    new one works. The new secret is generated here and is NEVER logged, audited, or
+    returned — only the fact of rotation is. (DVWA has no separate app keys; the DB
+    password is the credential of value.)"""
+    cid = _resolve(target)
+    rc, out, err = _docker("exec", cid, "sh", "-c",
+                           "find /var/www -name config.inc.php 2>/dev/null | head -1")
+    path = out.strip()
+    if rc != 0 or not path:
+        raise Rejected(f"could not locate app DB config: {err.strip() or 'not found'}")
+    rc, cfg, err = _docker("exec", cid, "cat", path)
+    if rc != 0:
+        raise Rejected(f"could not read config: {err.strip() or rc}")
+    mu, mp = _DB_USER_RE.search(cfg), _DB_PASS_RE.search(cfg)
+    if not mu or not mp:
+        raise Rejected("could not parse db_user/db_password from config")
+    user, old = mu.group(1), mp.group(1)
+    if not _DB_IDENT.fullmatch(user):
+        raise Rejected(f"refusing to rotate: unexpected db_user {user!r}")
+    new = secrets.token_hex(16)   # 32 hex chars: high entropy, shell/sed/SQL-safe
+
+    # 1. set the new password on the DB account (root via the container's local
+    #    socket — no old password needed). SET PASSWORD/PASSWORD() works across
+    #    old MariaDB (10.1) and new; ALTER USER does not exist on 10.1.
+    rc, _, err = _docker("exec", cid, "mysql", "-u", "root", "-e",
+        f"SET PASSWORD FOR '{user}'@'localhost' = PASSWORD('{new}');")
+    if rc != 0:
+        # DB errors can echo the SQL (and thus the new secret) — redact it.
+        raise Rejected(f"DB password change failed: {(err.strip() or str(rc)).replace(new, '***')}")
+
+    # 2. update the app config to match, right after the ALTER.
+    # ponytail: tiny window where the app would see a mismatch — fine on one box;
+    # a transactional rotation would need app cooperation.
+    expr = r"s#\(db_password'[^']*=[^']*'\)[^']*#\1" + new + "#"
+    rc, _, err = _docker("exec", cid, "sed", "-i", expr, path)
+    if rc != 0:  # config now out of sync — roll the DB back so the app keeps serving
+        _docker("exec", cid, "mysql", "-u", "root", "-e",
+            f"SET PASSWORD FOR '{user}'@'localhost' = PASSWORD('{old}');")
+        raise Rejected("config update failed, rolled DB password back: "
+                       + (err.strip() or str(rc)).replace(new, "***"))
+
+    # 3. verify: new creds work AND the old (possibly stolen) creds are dead.
+    #    --password= form (not -p) so an empty old password can't trigger a prompt.
+    new_ok = _docker("exec", cid, "mysql", "-u", user, f"--password={new}", "-e", "SELECT 1")[0] == 0
+    old_dead = _docker("exec", cid, "mysql", "-u", user, f"--password={old}", "-e", "SELECT 1")[0] != 0
+    if not (new_ok and old_dead):
+        raise Rejected(f"rotation unverified (new_ok={new_ok}, old_dead={old_dead})")
+    return (f"rotated DB password for '{user}' in {target}: stolen credentials are now "
+            f"invalid, app config updated, verified (old rejected, new works). "
+            f"New secret not logged.")
+
+
 # ---- tool registry (Anthropic tool-use schemas) ----------------------------
 
 _T = {"type": "object", "properties": {"target": {"type": "string",
@@ -263,13 +323,19 @@ CONTROL_TOOLS = [
      "input_schema": _T},
     {"name": "release_container", "description":
      "Un-freeze a quarantined container (docker unpause).", "input_schema": _T},
+    {"name": "rotate_secret", "description":
+     "Rotate the target app's database password so credentials an attacker stole "
+     "(via RCE, SQLi exfil, or reading the config) are instantly useless. Generates "
+     "a fresh secret server-side (never shown), updates the app config to match, and "
+     "verifies the old creds are dead. Use after a confirmed credential-exposure breach.",
+     "input_schema": _T},
 ]
 
 CONTROL_DISPATCH = {
     "list_processes": list_processes, "list_sessions": list_sessions,
     "kill_process": kill_process, "kill_session": kill_session,
     "isolate_egress": isolate_egress, "quarantine_container": quarantine_container,
-    "release_container": release_container,
+    "release_container": release_container, "rotate_secret": rotate_secret,
 }
 
 
@@ -340,7 +406,15 @@ def _selftest():
             return (0, "breach-agent_default \n", "")
         if args[0] == "exec" and "ls" in a:
             return (0, "sess_abc\nsess_def\n", "")
-        if args[0] in ("exec", "pause", "unpause", "network"):
+        if args[0] == "exec" and "find" in a:
+            return (0, "/var/www/html/config/config.inc.php\n", "")
+        if args[0] == "exec" and "cat" in a:
+            return (0, "$_DVWA[ 'db_user' ] = 'app';\n"
+                       "$_DVWA[ 'db_password' ] = 'oldpw';\n", "")
+        if args[0] == "exec" and "mysql" in a:
+            # old (possibly stolen) creds must be dead after rotation
+            return (1, "", "Access denied") if "--password=oldpw" in args else (0, "1\n", "")
+        if args[0] in ("exec", "pause", "unpause", "network"):  # sed, kill, rm, ...
             return (0, "", "")
         return (0, "", "")
 
@@ -365,6 +439,12 @@ def _selftest():
     assert run_tool("kill_session", {"target": "dvwa", "session_id": "../../etc/passwd"}).startswith("REJECTED")
     assert run_tool("kill_session", {"target": "dvwa", "session_id": "abc"}).startswith("invalidated")
 
+    # rotate_secret: happy path confirms + NEVER leaks the secret; boundary holds
+    out = run_tool("rotate_secret", {"target": "dvwa"})
+    assert out.startswith("rotated DB password"), out
+    assert "oldpw" not in out and "not logged" in out.lower(), out
+    assert run_tool("rotate_secret", {"target": "proxy"}).startswith("REJECTED")
+
     # unknown tool and bad kwargs never raise
     assert run_tool("bogus", {}).startswith("ERROR")
     assert run_tool("kill_process", {"target": "dvwa", "oops": 1}).startswith("ERROR")
@@ -380,6 +460,25 @@ def _selftest():
     assert all(set(r) == {"name", "schema", "fn"} for r in REGISTER)
     assert next(r for r in REGISTER if r["name"] == "kill_session")["fn"](
         target="proxy", session_id="x").startswith("REJECTED")
+
+    # rotate_secret must NOT leak the generated secret even if the DB echoes the SQL
+    def failrunner(args):
+        a = " ".join(args)
+        if args[0] == "ps":
+            return (0, "fakecid\n", "")
+        if args[0] == "exec" and "find" in a:
+            return (0, "/c.php\n", "")
+        if args[0] == "exec" and "cat" in a:
+            return (0, "$_DVWA[ 'db_user' ] = 'app';\n$_DVWA[ 'db_password' ] = 'oldpw';\n", "")
+        if args[0] == "exec" and "mysql" in a:   # echo the whole command incl the secret
+            return (1, "", f"ERROR 1064 syntax near \"{a}\"")
+        return (0, "", "")
+    _RUNNER = failrunner
+    try:
+        rotate_secret("dvwa")
+        assert False, "rotate_secret should have raised on DB failure"
+    except Rejected as e:
+        assert not re.search(r"[0-9a-f]{32}", str(e)), f"secret leaked in error: {e}"
 
     print("actuator self-test: ALL PASSED")
 
