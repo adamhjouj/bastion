@@ -55,11 +55,31 @@ def test_bad_addresses_rejected(monkeypatch, field, value):
         mail.prepare_message(incident())
 
 
-def test_missing_key_never_uses_another_transport(monkeypatch):
+def test_missing_key_uses_local_fallback_not_resend(monkeypatch, tmp_path, capsys):
+    # Local demo, no RESEND_API_KEY: must not drop the alert and must not crash;
+    # it lands in a local sink (file + stdout) instead of hitting Resend.
     monkeypatch.delenv("RESEND_API_KEY")
-    with pytest.raises(mail.MailError, match="RESEND_API_KEY") as error:
-        mail.send_email(incident())
-    assert not error.value.retryable
+    monkeypatch.setattr(mail, "LOCAL_OUTBOX", tmp_path / "local_mail.jsonl")
+
+    def fail_if_called(request):
+        pytest.fail("must not call Resend when no key is configured")
+    result = mail.send_email(incident(), transport=httpx.MockTransport(fail_if_called))
+    assert result["provider"] == "local" and result["status"] == "accepted"
+    lines = (tmp_path / "local_mail.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["to"] == ["recipient@example.com"]
+    assert "Bastion security incident" in record["subject"]
+    out = capsys.readouterr().out
+    assert "no RESEND_API_KEY" in out and "Bastion security incident" in out
+
+
+def test_blank_key_is_not_a_config_error_but_bad_key_is(monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY")
+    assert mail.validate_config() is None
+    monkeypatch.setenv("RESEND_API_KEY", "not-a-real-key")
+    with pytest.raises(mail.MailError, match="RESEND_API_KEY"):
+        mail.validate_config()
 
 
 @pytest.mark.parametrize("code,retry", [(401, False), (403, False), (422, False), (429, True), (500, True)])

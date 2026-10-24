@@ -1,15 +1,23 @@
-"""Resend-only HTTPS email delivery. No local relay or transport fallback.
+"""Resend HTTPS email delivery, with a local fallback when no key is configured.
 
 Success means accepted by Resend, NOT delivered to an inbox. Resend's email log
 is the source of delivery/bounce status until authenticated webhooks are added.
+
+No RESEND_API_KEY (blank/unset) is a supported, non-fatal state for local demos:
+send_email() writes the alert to LOCAL_OUTBOX and stdout instead of calling Resend.
+Set a real key to send through Resend; a key that IS set but malformed is still
+a hard config error (MailError), since that's a mistake, not "no key configured".
 """
 import hashlib
 import html
 import json
 import os
 from email.utils import getaddresses
+from pathlib import Path
 
 import httpx
+
+LOCAL_OUTBOX = Path(os.getenv("BASTION_DATA_DIR", str(Path(__file__).resolve().parent / "data"))) / "local_mail.jsonl"
 
 
 class MailError(Exception):
@@ -31,9 +39,12 @@ def _addresses(value):
 
 
 def validate_config():
+    """Return the Resend key, None to use the local fallback, or raise on a bad key."""
     key = os.getenv("RESEND_API_KEY", "").strip()
+    if not key:
+        return None
     if not key.startswith("re_") or len(key) < 10 or key in {"re_...", "re_your_key"}:
-        raise MailError("Set a real RESEND_API_KEY in .env", retryable=False)
+        raise MailError("RESEND_API_KEY is set but invalid; fix it in .env or clear it to use the local fallback", retryable=False)
     return key
 
 
@@ -58,6 +69,21 @@ def prepare_message(incident):
             "text": text, "html": "<h2>" + html.escape(subject) + "</h2><pre style=\"white-space:pre-wrap\">" + html.escape(text) + "</pre>"}
 
 
+def _deliver_local(message, delivery_key):
+    """No RESEND_API_KEY: don't drop the alert, don't crash-loop. Write it where a
+    local demo can see it instead (file + stdout), same shape as a MailHog catcher.
+
+    ponytail: one JSONL file + a print, not a MailHog container/service. Good
+    enough to see alerts fire locally; swap to real Resend by setting a key.
+    """
+    LOCAL_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+    with LOCAL_OUTBOX.open("a") as fh:
+        fh.write(json.dumps({**message, "provider": "local", "id": delivery_key}) + "\n")
+    print(f"[local-mail] (no RESEND_API_KEY set) {message['subject']} -> {', '.join(message['to'])}\n"
+          f"{message['text']}\n--- also appended to {LOCAL_OUTBOX} ---", flush=True)
+    return {"provider": "local", "provider_id": delivery_key, "status": "accepted"}
+
+
 def send_email(incident, *, transport=None):
     # Capture sender/recipients/content at enqueue time so retries cannot silently
     # change the payload attached to a provider idempotency key.
@@ -65,6 +91,8 @@ def send_email(incident, *, transport=None):
     key = incident.get("_mail_key") or hashlib.sha256(json.dumps(message, sort_keys=True).encode()).hexdigest()
     delivery_key = "bastion/" + hashlib.sha256(key.encode()).hexdigest()
     api_key = validate_config()
+    if api_key is None:
+        return _deliver_local(message, delivery_key)
     payload = {k: message[k] for k in ("from", "to", "subject", "text", "html")}
     # Fixed endpoint; a configured secret is never sent to an arbitrary host.
     try:
