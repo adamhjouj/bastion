@@ -33,7 +33,9 @@ USE_CLAUDE = bool(os.environ.get("ANTHROPIC_API_KEY"))
 # Deterministic virtual-patch rules per attack type (used by autoblock, no LLM).
 CANNED_WAF = {
     "sql_injection": r"(?i)(union\s+select|\bor\s+1\s*=\s*1|'\s*or\s*'|information_schema|\bsleep\s*\(|--\s|\bupdatexml\b)",
-    "command_injection": r"(?i)(;\s*\w|\|\||&&|\$\(|`|/etc/passwd|/bin/|\b(cat|whoami|id|uname|nc|wget|curl)\b)",
+    # Require a shell-metachar / command context — NOT bare words like "id",
+    # which would match the ubiquitous ?id= parameter and over-block everything.
+    "command_injection": r"(?i)(;\s*\w|&&\s*\w|\|\s*(cat|whoami|id|ls|uname|sh|bash|nc|wget|curl|echo|ping)\b|\$\(|`|/etc/(passwd|shadow)|/bin/)",
     "xss": r"(?i)(<script|onerror\s*=|onload\s*=|javascript:)",
     "path_traversal": r"(?i)(\.\./|\.\.\\|%2e%2e|/etc/passwd)",
 }
