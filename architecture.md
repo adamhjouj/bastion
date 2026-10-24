@@ -1,86 +1,109 @@
-# Bastion architecture: current implementation
+# Architecture
 
-## Data plane
+This document describes implementation details. See [README.md](README.md) for setup, operating modes, and usage.
 
-`proxy.py` is a FastAPI reverse proxy and request-log producer. Catch-all requests follow this order:
+## Components
 
-1. Read shared defenses, cached by state-file mtime.
-2. Forward diverted IPs to the honeypot when configured. Diversion precedes every other defense.
-3. Reject active denylisted IPs with 403; expired TTL entries do not block forwarding.
-4. Apply per-IP sliding-window capacity limits (429).
-5. Forward to DVWA, pinning the security cookie when `enforced_security` is set.
-6. Log the observed status, request data and enforcement outcome.
+| Component | Entry point | Responsibility |
+| --- | --- | --- |
+| Proxy | `proxy.py` | Forward requests, enforce defenses, classify inline, capture events, serve management endpoints |
+| Investigator | `blue_agent.py` | Consume queued events, classify asynchronously, run bounded LLM tool loops |
+| Classifier | `classifier.py` | Call Jev, validate responses, enforce model-call budgets and inline deadlines |
+| Actuator | `actuator_app.py` | Authenticate and validate infrastructure tool calls, apply deployment policy, execute Docker operations |
+| Actuator client | `actuator_client.py` | Expose remote infrastructure tools to the investigator |
+| Mail worker | `mail_worker.py` | Deliver pending notifications independently of investigations |
+| Notification transport | `notifications.py` | Render incident emails and submit them to Resend |
+| Honeypot | `honeypot_app.py` | Serve a static decoy and record diverted traffic |
+| Store | `store.py` | Maintain shared defenses, durable queues, action records, budgets, and health |
+| Dashboard | `dashboard.html` | Render traffic, incidents, defenses, and agent activity |
 
-There is no regex payload detector or WAF rule loop. Legacy `state['rules']` is ignored. The initial request is not held for model classification.
+Compose names the project `bastion`. The proxy, investigator, actuator, honeypot, and mail worker share the `bastion-data` volume. DVWA is the bundled target. Only the actuator service mounts the Docker socket.
 
-Management routes (`/__dashboard`, `/__state`, `/__stream`) are served before the catch-all. They currently have no authentication and bypass the application enforcement path. SSE watches file mtimes every half-second and publishes snapshots; the browser falls back to polling.
+## Request lifecycle
 
-## Detection and response
+The proxy buffers requests up to `MAX_REQUEST_BYTES`, derives source identity, and builds a structured, redacted observation. It reserves an event record before forwarding; queue exhaustion returns 503.
 
-`blue_agent.py` polls `events.jsonl`. Every eligible request reaches the configured model pipeline without a signature pre-gate:
+Enforcement runs in this order:
 
-- Jev enabled: `classifier.py` calls its REST API for maliciousness and attack type. Benign verdicts are dropped; flags reach the LLM if configured. Errors also reach the LLM when available.
-- Jev unavailable: requests go directly to the configured LLM.
-- LLM available: a manual tool-use loop supplies the environment, tool catalog, requests and existing bans. The model can investigate, contain, remediate and report.
-- `JEV_AUTOBLOCK=1` with LLM: high-confidence flags may be silently diverted while the model investigates.
-- `JEV_AUTOBLOCK=1` without LLM: flags trigger TTL bans and reports. No signature rules are installed.
-- No engine, or Jev-only with autoblock disabled: no automatic payload containment.
+1. Divert configured sources to `HONEYPOT_URL`.
+2. Reject active denylisted sources with 403.
+3. Apply the per-source sliding-window rate limit, returning 429 when exceeded.
+4. In `inline` mode, classify through Jev before forwarding. Malicious verdicts return 403; unavailable classification follows `INLINE_FAILURE`.
+5. Forward to `DVWA_URL`, overriding the inbound security cookie if an enforced level is present.
 
-The agent skips blocked requests and all IPs still present in the denylist, including expired entries. The latter is a known bug scheduled in the implementation plan.
+The forwarding client preserves duplicate query parameters and multiple response cookies. It removes hop-by-hop headers, rebuilds source attribution, and currently strips `Authorization` before forwarding. Response buffering is bounded by `MAX_RESPONSE_BYTES`; upstream errors and oversized responses return 502.
 
-Requests are deduplicated, then dispatched to bounded concurrent per-IP investigators (`SWARM_MAX=4`). At `SUPERVISOR_MIN=8` distinct IPs, one campaign investigator receives a compact summary. Source count selects coordination strategy, not a deterministic threat verdict. Exact request-data keys memoize Jev responses per poll; source identity is currently excluded from these keys despite being included in the classifier prompt.
+After enforcement or forwarding, the proxy finalizes the event with the observed response status and outcome. Observe-mode events are terminal immediately; other modes queue them for the investigator. Unexpected interruption can leave a reserved event in `receiving` until its lease expires.
 
-`llm.py` selects DeepSeek first when its key is present, otherwise Anthropic. There are no local model calls. Without keys it returns no client.
+## Management and source identity
 
-## Tool modules
+`/__dashboard`, `/__state`, `/__stream`, and `/__health` require `MANAGEMENT_TOKEN`. Clients may use Bearer authentication or HTTP Basic with username `admin`. Framework-generated API documentation routes are disabled.
 
-Tools are registered as `{name, schema, fn}`. `tools.catalog()` builds a grouped catalog from live registrations.
+The SSE endpoint checks snapshots once per second and emits a new snapshot on change. The browser falls back to polling if SSE fails. Snapshots include recent records, aggregate counts, active defenses, queue state, and component health. Console panes currently have no backing log stream; use Compose logs for service output.
 
-- Core agent tools: individual/bulk bans, incident reports, recorded-request inspection.
-- `tools.py`: defenses, recent requests/incidents, container status.
-- `honeypot_tools.py`: diversion and release.
-- `remediation_tools.py`: DVWA security-level change, read-back and proxy cookie-enforcement intent.
-- `actuator.py`: process/session listing and termination, network disconnect, pause/unpause and DB credential rotation.
+Application-level source attribution uses the peer address unless the peer belongs to `TRUSTED_PROXY_CIDRS`. Trusted chains are processed from the nearest proxy outward. `DEMO_IDENTITY=1` explicitly enables first-hop X-Forwarded-For identity for lab traffic. Deployment must also account for the ASGI server's own proxy-header handling.
 
-`inspect_target` now returns recorded method/path/query/body without token signatures, endpoint allowlists or heuristic threat judgments. Recorded text is decoded and body-truncated by the proxy; it is not lossless original HTTP evidence.
+## Classification and investigation
 
-The model does not receive an arbitrary shell tool. However, its process has the Docker socket in Compose. Argument validation is useful but is not a host-level privilege boundary. Boot-time process baselines also do not prove that every later process is malicious.
+The investigator claims up to 32 events at a time with a 180-second lease. Failed events retry with backoff and move to `dead` after three claimed attempts. Restarts resume queued work rather than skipping to the current log end.
 
-Regex remains for non-detection tasks such as session-ID validation, config parsing and CSRF token extraction. It does not classify HTTP traffic.
+In asynchronous classification, Jev flags are passed to the LLM when configured; provider errors also escalate when an investigator is available. Without Jev, agent mode sends eligible requests directly to the LLM. Classifier-containment mode applies a 15-minute source ban and queues an incident report for a malicious verdict. Inline verdicts are attached to events and reused by the investigator.
 
-## State and observability
+Source count controls investigation coordination. Below `SUPERVISOR_MIN`, requests are grouped by source and investigated in a pool bounded by `SWARM_MAX`. At or above the threshold, one campaign investigator receives a compact source/payload summary. This routing decision is not proof that a campaign exists.
 
-`store.py` defines paths under `/app/data`, shared by a Docker volume:
+The agent loop enforces eight turns, sixteen tool calls, a 60-second case budget checked between operations, and a 24,000-token usage threshold. SDK calls have timeouts; a running tool can extend beyond the remaining case budget. These are operational limits, not hard process-level cancellation guarantees. Model-call budgets are enforced transactionally in the shared store.
 
-| File | Contents |
+The system prompt includes environment context, the registered tool catalog, and operating instructions. Request content and tool results are treated as untrusted evidence. This is a prompt-level precaution, not a complete defense against prompt injection.
+
+## Tools and infrastructure authority
+
+Tools are registered as `{name, schema, fn}` entries. Core response tools live in `blue_agent.py`; read-only context tools in `tools.py`; diversion tools in `honeypot_tools.py`; infrastructure and DVWA-remediation tools are exposed through `actuator_client.py`.
+
+Before dispatch, the investigator validates tool arguments against JSON Schema and applies the destructive-action setting. Read-only tools execute directly. Mutating actions use an execution key derived from case ID, tool name, and parameters. The store records the attempt before calling the handler. An interrupted attempt returns `UNKNOWN` on retry rather than silently repeating the operation.
+
+The actuator independently authenticates requests, validates parameters, applies `ALLOW_DESTRUCTIVE`, checks budgets, and limits concurrent execution. Docker operations resolve an allowlisted service through Compose project/service labels. Process termination checks container ID, PID, start time, baseline membership, and protected service names; target-side pidfd support is required. A newly observed process is a candidate, not evidence of compromise.
+
+`patch_vuln` changes DVWA's security level, verifies the same session, and persists the level the proxy must pin. Failure to persist enforcement is reported as a partial failure. Credential rotation updates the database and app configuration, verifies new/old credentials, and attempts verified rollback on failure.
+
+The actuator remains highly privileged. Its API reduces the model container's direct authority but does not make Docker socket access safe for an untrusted host.
+
+## Persistence
+
+The active database is `bastion.db` under `BASTION_DATA_DIR`, using SQLite WAL with writer transactions and a busy timeout.
+
+| Table | Contents |
 | --- | --- |
-| `state.json` | denylist, optional honeypot diversions, optional enforced security |
-| `events.jsonl` | request observations |
-| `actions.jsonl` | triage and tool attempts/results |
-| `incidents.jsonl` | incident records |
-| `honeypot_hits.jsonl` | decoy requests |
-| `logs/*.log` | process output where actually collected |
+| `state` | Source bans, diversions, enforced application security |
+| `records` | Request observations, triage, tool activity, incidents, decoy hits |
+| `executions` | Mutating-action attempts and cached results |
+| `outbox` | Frozen notification payloads, retry counts, scheduling state |
+| `mail_receipts` | Resend acceptance IDs and safe delivery errors |
+| `budgets` | Per-window model and actuator call counters |
+| `health` | Latest component health reports |
+| `meta` | Migration markers |
 
-Atomic replace prevents partial state-file reads. Locks serialize writes within one Python process, not across processes. Reads load whole files; logs and limiter identity entries are unbounded.
+Queue transitions are `receiving`, `pending`, `processing`, and finally `done` or `dead`. The `available` timestamp schedules retries; leases permit recovery from interrupted processing. The current schema does not assign an ownership token to a claim, so deployments should keep a single investigator and review lease duration before increasing concurrency.
 
-The dashboard displays the latest 200 events and 400 actions, incidents, defenses and log tails. It now exposes diversion and enforced-security state and labels escalations as escalations. Most counters are still window-derived, bans are not filtered for expiry, and replay's 'LEAKED' label does not prove actual disclosure. These remain planned fixes.
+The legacy JSON/state files are backed up and imported once. Their path constants remain as stream identifiers for older tool interfaces; normal writes go to SQLite. Retention removes terminal records older than `RETENTION_DAYS`; it does not currently prune every auxiliary table or legacy backup.
 
-## Demo infrastructure
+## Notifications
 
-`docker-compose.yml` defines DVWA, proxy, blue, honeypot, the actuator and an independent Resend mail worker. `run.sh` builds/starts the stack. Email uses only Resend's HTTPS API; there is no local mail server or SMTP fallback. The mail worker shares the durable outbox and does not wait for model investigations. It stores Resend acceptance IDs and safe errors, freezes message content at enqueue time and reuses provider idempotency keys on transient retries. Acceptance is not inbox delivery; delivery/bounce status is currently checked in Resend's email log, not via webhooks.
+Incident creation and outbox enqueueing share one transaction. The message captures sender, recipients, and rendered content when queued, so a retry does not change its provider-idempotent payload after configuration changes.
 
-`bootstrap_dvwa.authed_session` resets the database, logs in and selects low security. `red_agent.py` calls it at import and then runs one of two prompted lab objectives, SQL injection or command injection. Its tool does not yet enforce endpoint scope independently of the prompt.
+The independent mail worker leases pending messages and submits them to Resend. Network failures, rate limiting, and server failures are retryable; permanent refusals move the message to `dead`. Attempts stop after five failures. A provider acceptance ID is recorded in `mail_receipts`, and the outbox status becomes `accepted`.
 
-The honeypot returns a static portal for every route, optionally delays responses and records hits. It shares a writable data volume and Docker network; stronger isolation is required before non-local use.
+The lease is 60 seconds and the HTTP client timeout is 10 seconds. Resend retries reuse a stable idempotency key; provider idempotency retention is finite, so this is not an unlimited exactly-once guarantee. Delivery and bounce webhooks are not implemented. Resend's email log remains the source of recipient-server delivery status.
 
-The default actuator project name is `breach-agent`, while Compose currently uses normal project-name discovery. Configure matching identities or actuator resolution can fail. The single shared network also means `isolate_egress` usually has no separate network to disconnect.
+## Data handling
 
-## Verification boundaries
+`privacy.py` redacts recognized sensitive keys in form and JSON data, preserves duplicate form/query parameters, and omits unstructured bodies from the main proxy's model view. Field redaction cannot identify every secret in arbitrary text, URL paths, process output, or human-written incident evidence. External-provider use requires a suitable data-handling policy.
 
-`test_model_detection.py` exercises the actual proxy with ASGI transport and mocked upstreams, checks legacy regex rules are ignored, verifies bans remain effective and confirms non-signature-bearing requests reach Jev. `test_inspect.py` verifies factual inspection.
+The decoy returns the same portal for every route and optionally delays responses. It shares the demo network and writable data volume; it is not an isolated production deception environment.
 
-Other tests cover TTL mutation, cookies, tools, supervisor dispatch and rate limits. Several legacy scripts mutate global state at import; honeypot/rate-limit E2E scripts use replicated proxy shims. Live model behavior and real Docker remediation are not established by these mocks.
+## Verification and remaining boundaries
 
-`eval_waf.py` calls the real Jev API over a small labeled dataset and reports precision/recall confidence intervals, repeated-run variance and leakage probes. It does not currently implement every metric historically advertised, and some probe-error paths are fragile.
+Pytest uses a temporary database per test and mocked HTTP transports. Coverage includes the real proxy app, authentication, classifier failures, state changes, tool dispatch, queues, and Resend submission/retry behavior. A live synthetic notification was also received successfully. These checks do not measure model judgment, prove exploit prevention, or validate real Docker remediation across supported environments.
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the remaining issues, delivery order and acceptance criteria, including optional inline Jev classification to address first-request exposure without restoring payload signatures.
+`eval_waf.py` measures Jev against a small labeled dataset with precision/recall confidence intervals and optional repeated sampling. It is an evaluation utility, not a production detection-quality claim.
+
+Priority hardening areas are a verified Compose startup/shutdown workflow, explicit image build targets, resource/client lifecycle cleanup, queue lease ownership, broader network isolation, reliable historical dashboard metrics, and live provider/actuator integration tests. Keep the supplied stack local while those boundaries remain.

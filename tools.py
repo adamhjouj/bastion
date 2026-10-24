@@ -1,25 +1,4 @@
-"""The blue-team agent's situational awareness + tool catalog.
-
-Two jobs, both about making the agent actually UNDERSTAND its environment and its
-toolbox instead of only reacting to a flagged request:
-
-  1. ORIENT tools (defined here) — read-only "look around" actions with NO side
-     effects, so the agent can see the environment it is defending before it acts:
-     its own current defenses, the recent request traffic, the incidents it has
-     already raised, and which containers are up/paused/isolated. These plug into
-     the agent's tool-use loop via the same {name,schema,fn} REGISTER hook the
-     action modules (remediation_tools / actuator / honeypot_tools) use.
-
-  2. catalog(schemas) — renders the WHOLE registered tool set (core + every
-     module + these orient tools) into the text the agent is taught in its system
-     prompt, grouped by purpose. Driven by the live schema list, so a tool that is
-     registered but not yet hand-documented still shows up — the agent is never
-     blind to a tool it can call.
-
-ENVIRONMENT is the standing briefing (what the app/proxy/network are) prepended to
-that catalog. Together they are the "understands where it is, what its job is, and
-what it can do" context the agent was missing.
-"""
+"""Read-only investigation tools and the agent's environment/tool catalog."""
 import json
 
 import store
@@ -28,19 +7,17 @@ import store
 
 
 def do_get_defenses(**_):
-    """Everything the agent is CURRENTLY enforcing — so it can avoid duplicate
-    actions and reason about what is already contained."""
+    """Return active defenses to ground subsequent actions."""
     st = store.load_state()
     return json.dumps({
         "denylist": [d for d in st.get("denylist", []) if store.active_ban(d)],
-        "honeypot_diverts": st.get("honeypot", []),   # IPs silently routed to the decoy
-        "enforced_security": st.get("enforced_security"),  # app hardening pinned by patch_vuln
+        "honeypot_diverts": st.get("honeypot", []),
+        "enforced_security": st.get("enforced_security"),
     }, indent=2)
 
 
 def do_recent_requests(limit=20, **_):
-    """The last `limit` HTTP requests the proxy saw (decoded), newest last. The
-    agent's window onto live traffic beyond the single batch it was handed."""
+    """Return bounded recent request observations, newest last."""
     limit = _clamp(limit, 1, 200, 20)
     evs = store.read_jsonl(store.EVENTS_FILE, limit=limit)
     keep = ("ts", "ip", "method", "path", "query", "status", "blocked", "matched")
@@ -54,9 +31,7 @@ def do_recent_incidents(limit=10, **_):
 
 
 def do_service_status(**_):
-    """Which containers make up the environment and their state (running / paused /
-    exited) — so the agent knows what it is defending and whether a prior containment
-    action (quarantine/isolate) is in effect. Best-effort; needs the docker socket."""
+    """Query target container status through the authenticated actuator."""
     from actuator_client import call_tool
     return call_tool("service_status", {})
 
@@ -102,8 +77,7 @@ ORIENT_REGISTER = [
 
 # ---- tool catalog rendering (drives the system prompt) ---------------------
 
-# Purpose grouping for the catalog. A tool not listed here still appears, under
-# "Other" — so the agent is never blind to a registered tool.
+# Unclassified registrations appear under Other.
 _GROUPS = [
     ("SITUATIONAL AWARENESS (read-only — orient with these BEFORE you act)",
      ["get_defenses", "recent_requests", "recent_incidents", "service_status",
@@ -119,9 +93,7 @@ _GROUPS = [
 
 
 def catalog(schemas):
-    """Render the live tool set into grouped `- name: one-line purpose` text for the
-    system prompt. `schemas` is the agent's actual TOOLS list, so every registered
-    tool is taught — nothing the agent can call is left undocumented."""
+    """Render registered tools into a grouped prompt catalog."""
     by_name = {s["name"]: s.get("description", "") for s in schemas}
     placed = set()
     lines = []
@@ -143,10 +115,7 @@ def catalog(schemas):
 
 
 def _tag(desc, limit=72):
-    """Short purpose tag for the catalog. The FULL description is already sent in the
-    tool schema, so the catalog only needs grouping + a one-glance tag — this keeps the
-    system prompt lean (no duplicated paragraphs). Takes the first sentence, drops the
-    'Read-only.' prefix (the group title already says it), and caps length."""
+    """Use a capped first sentence; full descriptions remain in tool schemas."""
     d = " ".join(desc.split())
     if d.startswith("Read-only."):
         d = d[len("Read-only."):].strip()

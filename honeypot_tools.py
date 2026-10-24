@@ -1,19 +1,4 @@
-"""Soft-containment tool for the blue agent: DIVERT a confirmed attacker to a decoy.
-
-Instead of a hard 403 ban (which tips the attacker off), divert_to_honeypot silently
-routes a source IP to a honeypot decoy so they keep probing a fake target — wasting
-their time and revealing techniques — while the blue team remediates and prepares a ban.
-
-State contract (shared via store.state.json):
-    state["honeypot"] is a list of {"ip": str, "reason": str, "ts": iso8601}.
-The proxy (SEPARATE work, not this module) reads this list and forwards those IPs to
-the decoy (HONEYPOT_URL) instead of the real app, logging the hit as "diverted" rather
-than "blocked". This module only records intent; it never touches the proxy.
-
-Exposed as Anthropic tool schemas (DIVERT_TOOL / UNDIVERT_TOOL) + string-returning
-dispatch wrappers (do_divert_to_honeypot / do_undivert) and a REGISTER *list* of
-{"name","schema","fn"} entries, matching blue_agent.py's registration hook.
-"""
+"""Persist per-source diversion decisions for the proxy's honeypot routing."""
 import store
 
 
@@ -87,7 +72,6 @@ UNDIVERT_TOOL = {
     },
 }
 
-# For blue_agent.py registration: a LIST of {"name","schema","fn"} entries.
 REGISTER = [
     {"name": "divert_to_honeypot", "schema": DIVERT_TOOL, "fn": do_divert_to_honeypot},
     {"name": "undivert", "schema": UNDIVERT_TOOL, "fn": do_undivert},

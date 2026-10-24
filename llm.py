@@ -1,11 +1,4 @@
-"""Provider shim. The agents are written against the Anthropic Messages API;
-this aims that same SDK at Anthropic OR DeepSeek's Anthropic-compatible endpoint,
-chosen by whichever key is set, so blue + red stay provider-agnostic.
-
-    DEEPSEEK_API_KEY  -> DeepSeek  (https://api.deepseek.com/anthropic, deepseek-chat)
-    else ANTHROPIC_API_KEY -> Anthropic
-    neither           -> no agent (blue falls back to Jev autoblock)
-"""
+"""Anthropic Messages API clients and model selection; DeepSeek takes precedence."""
 import os
 
 import anthropic

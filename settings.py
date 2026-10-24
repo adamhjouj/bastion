@@ -1,4 +1,4 @@
-"""Validated deployment policy. Detection is model-driven, never signature-based."""
+"""Validated operating modes, credentials, and resource limits."""
 import os
 from dataclasses import dataclass
 

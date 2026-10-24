@@ -1,24 +1,7 @@
-"""Vuln-remediation tools for the blue agent (non-WAF eradication actions).
+"""DVWA security-level remediation, called through the actuator.
 
-Unlike a WAF rule or an IP ban (which tape over the hole), these fix the hole.
-First tool: patch_vuln() raises DVWA's security level so the exploited module
-switches to its safe, parameterized/sanitized code path ("impossible" = DVWA's
-hardened source: prepared statements, CSRF tokens, output encoding). Stronger
-than a WAF rule or IP ban for clients that use the server's level.
-
-# Cookie-bypass closed by a shared contract: DVWA reads the level per-request from
-# the inbound 'security' cookie, so a client that PINS security=low would bypass a
-# raised server level. On success patch_vuln records enforced_security in state.json;
-# the proxy strips/overrides the inbound 'security' cookie to that level (default
-# pass-through when unset). Setting 'low' clears enforcement (reset). # ponytail:
-# enforcement is proxy-side — this module only records intent.
-
-Exposed as an Anthropic tool (PATCH_VULN_TOOL) + a string-returning dispatch fn
-(do_patch_vuln) matching blue_agent.py's DISPATCH/TOOLS convention, so it can be
-registered there without this module importing the agent.
-
-# ponytail: control-plane action straight to DVWA (not through the proxy, which
-# could WAF/rate-limit its own fix). Non-destructive login — does NOT reset the DB.
+The same session verifies the change. Persisted enforced_security tells the proxy
+to override client-chosen security cookies; changing a session alone is insufficient.
 """
 import os
 import re
@@ -46,10 +29,7 @@ def _read_level(html):
 
 
 def _apply_enforcement(state, level):
-    """Record the security level the proxy must pin by stripping/overriding the
-    inbound 'security' cookie (closes patch_vuln's per-cookie bypass). 'low' is the
-    vulnerable baseline, so setting low CLEARS enforcement -> proxy passes through.
-    Pure: returns the mutated state; caller persists it."""
+    """Set proxy cookie enforcement; low restores client-controlled behavior."""
     if level == "low":
         state.pop("enforced_security", None)
     else:
@@ -72,22 +52,15 @@ def patch_vuln(level="impossible", base_url=None):
         c.post("/security.php", data={"security": level, "seclev_submit": "Submit",
                                       "user_token": token})
         c.cookies.set("security", level)
-        # Confirm on the SAME session that did the POST. DVWA's level is
-        # per-session (cookie/$_SESSION), so a fresh login would read a
-        # different session's default and give a false confirmation — never
-        # cross-session confirm. If the read-back is unreadable we fail CLOSED
-        # (verified=False -> ok=False): a false "patched" is worse than a false
-        # "unconfirmed". In production patch_vuln talks directly to DVWA (no
-        # proxy), so this read-back does not flake.
+        # DVWA levels are session-specific; a fresh login cannot verify this change.
         new = _read_level(c.get("/security.php").text)
         c.close()
     except Exception as e:
         return {"ok": False, "requested": level, "error": type(e).__name__}
     ok = new == level
     if ok:
-        # Record the enforced level so the proxy pins it (closes the cookie bypass).
         try:
-            with store.state_lock:  # swarm-safe read-modify-write
+            with store.state_lock:
                 store.save_state(_apply_enforcement(store.load_state(), level))
         except Exception:
             return {"ok": False, "requested": level, "level": new, "verified": True,
@@ -127,8 +100,6 @@ PATCH_VULN_TOOL = {
     },
 }
 
-# For blue_agent.py registration: TOOLS.append(PATCH_VULN_TOOL);
-#                                 DISPATCH["patch_vuln"] = do_patch_vuln
 REGISTER = {"name": "patch_vuln", "schema": PATCH_VULN_TOOL, "fn": do_patch_vuln}
 
 

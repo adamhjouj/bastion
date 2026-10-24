@@ -1,30 +1,9 @@
-"""Privileged action layer for the blue-team agent — the agent's "hands inside
-the infrastructure" that a WAF structurally lacks (session kill, egress cut,
-process kill, quarantine), WITHOUT giving the LLM a shell.
+"""Allowlisted Docker operations executed by the actuator service.
 
-Safety model (this is the whole point of the file):
-  * The LLM never emits a command string. It calls a named tool with scalar
-    params; this module maps each tool to ONE fixed, arg-list subprocess call.
-    No shell=True, ever — the model's input can never become a command.
-  * Every target is a LOGICAL service name validated against ALLOWED_TARGETS
-    ({"dvwa"}). The agent cannot act on the proxy, on itself, on the mail worker, or on
-    any container outside this compose project. This is the hard boundary.
-  * kill_process can only kill a PID that is (a) a positive int, (b) currently
-    running in the target, and (c) NOT in the boot-time baseline. So apache /
-    mysqld / init are structurally unkillable — only attacker-spawned procs die.
-  * Session ids / network names are charset-validated before they touch a path.
-  * run_tool() never raises into the agent loop; it returns a string and audits
-    every attempt (ok / rejected / error) to data/actions.jsonl.
-
-Integration (no edits to blue_agent.py needed — avoids colliding with other
-sessions):  `import actuator; actuator.register(TOOLS, DISPATCH)` adds the
-tools + handlers to the existing Claude tool-use loop in one line.
-
-# ponytail: uses the `docker` CLI over the socket (no new dep vs the docker SDK).
-# Reaching Docker requires /var/run/docker.sock mounted into the blue container
-# (a one-line compose change, owned by the infra session). docker.sock == host
-# root — acceptable on a local demo box; split into an actuator sidecar if this
-# ever leaves the demo so the LLM container holds no socket.
+Commands use fixed argument lists with validated parameters. Process termination
+requires a current identity, a baseline check, and target-side pidfd support.
+Authentication and destructive-action policy are enforced in actuator_app.py.
+The service's Docker socket remains a host-level privilege boundary.
 """
 import os
 import re
@@ -48,7 +27,7 @@ _DB_USER_RE = re.compile(r"db_user'\s*\]\s*=\s*'([^']+)'")      # DVWA config.in
 _DB_PASS_RE = re.compile(r"db_password'\s*\]\s*=\s*'([^']*)'")
 _DB_IDENT = re.compile(r"[A-Za-z0-9_]{1,32}")                   # db usernames we'll touch
 
-_BASELINE = {}   # target -> frozenset(pid) captured at boot (before any attack)
+_BASELINE = {}   # target -> frozenset((container_id, pid, start_time))
 
 
 class Rejected(Exception):
@@ -104,11 +83,7 @@ def _pos_int(v):
 
 
 def _pids(cid):
-    """[(pid:int, cmd:str)] for the container, read from INSIDE the container's
-    PID namespace. Must match the namespace `docker exec kill` acts in — `docker
-    top` reports HOST pids (different numbers under a VM/rosetta), so killing a
-    top-reported pid fails or hits the wrong in-container process. `ps -eo
-    pid=,args=` suppresses the header; busybox (no -eo) falls back to plain ps."""
+    """Read container-namespace PIDs; docker top reports host-namespace PIDs."""
     rc, out, err = _docker("exec", cid, "ps", "-eo", "pid=,args=")
     if rc != 0:
         rc, out, err = _docker("exec", cid, "ps")  # busybox fallback
@@ -292,8 +267,7 @@ def rotate_secret(target):
         raise Rejected(f"DB password change failed: {(err.strip() or str(rc)).replace(new, '***')}")
 
     # 2. update the app config to match, right after the ALTER.
-    # ponytail: tiny window where the app would see a mismatch — fine on one box;
-    # a transactional rotation would need app cooperation.
+    # DB and config updates are not atomic; rollback handles detected failures.
     expr = r"s#\(db_password'[^']*=[^']*'\)[^']*#\1" + new + "#"
     rc, _, err = _docker("exec", cid, "sed", "-i", expr, path)
     def rollback():
@@ -423,8 +397,7 @@ REGISTER = [{"name": t["name"], "schema": t,
              "fn": (lambda _n=t["name"], **p: run_tool(_n, p))} for t in CONTROL_TOOLS]
 
 
-# No Docker or network work at import. The isolated actuator captures its baseline
-# explicitly at startup; stale/missing baselines fail closed for process termination.
+# Baselines are captured by the actuator's startup lifecycle, not during import.
 
 
 # ---- self-test (no real containers touched) --------------------------------
