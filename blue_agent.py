@@ -2,6 +2,7 @@
 pre-filter gates what reaches the LLM (so it idles for free on benign traffic),
 then Claude classifies suspicious batches and calls tools to blacklist the IP,
 add a virtual-patch WAF rule, and email an incident report."""
+import json
 import os
 import re
 import smtplib
@@ -12,9 +13,13 @@ from email.message import EmailMessage
 import anthropic
 
 import store
+from classifier import classify_request
 
 MODEL = os.environ.get("BLUE_MODEL", "claude-sonnet-5")
 POLL = 1.0
+# System-1 triage via Jev (auto-off if no key); regex pre-gate keeps Jev off benign traffic.
+USE_JEV = os.environ.get("USE_JEV", "1") == "1" and bool(os.environ.get("TYPESAFE_API_KEY"))
+USE_REGEX_PREGATE = os.environ.get("USE_REGEX_PREGATE", "1") == "1"
 
 # Gate: only requests containing these tokens are worth an LLM call.
 # ponytail: naive signature pre-filter — it only decides what to *look* at;
@@ -140,9 +145,15 @@ def send_email(inc):
 
 def analyse(client, events):
     st = store.load_state()
-    import json
-    user = ("Recent suspicious HTTP requests captured at the reverse proxy:\n\n"
-            + json.dumps(events, indent=2)
+    payload = []
+    for e in events:
+        item = {k: e.get(k) for k in ("ts", "ip", "method", "path", "query", "body", "status")}
+        if e.get("_jev"):
+            item["jev_classifier"] = e["_jev"]  # system-1 verdict (advisory)
+        payload.append(item)
+    user = ("Suspicious HTTP requests flagged at the reverse proxy, each with the "
+            "system-1 classifier (Jev) verdict (advisory — confirm before acting):\n\n"
+            + json.dumps(payload, indent=2)
             + "\n\nCurrent defenses already in place:\n"
             + json.dumps({"denylist": st["denylist"], "rules": st["rules"]}, indent=2))
     messages = [{"role": "user", "content": user}]
@@ -171,12 +182,25 @@ def main():
         evs = store.read_jsonl(store.EVENTS_FILE)
         new, offset = evs[offset:], len(evs)
         blocked_ips = {d["ip"] for d in store.load_state()["denylist"]}
-        suspicious = [e for e in new
-                      if not e["blocked"] and is_suspicious(e) and e["ip"] not in blocked_ips]
-        if suspicious:
-            print(f"[blue] {len(suspicious)} suspicious request(s) -> analysing", flush=True)
+        # cheap regex pre-gate -> system-1 (Jev) classify -> escalate confirmed malicious
+        candidates = [e for e in new if not e["blocked"] and e["ip"] not in blocked_ips
+                      and (not USE_REGEX_PREGATE or is_suspicious(e))]
+        escalate = []
+        for e in candidates:
+            if not USE_JEV:
+                escalate.append(e)
+                continue
+            v = classify_request(e)
+            e["_jev"] = v
+            if v.get("malicious") or v.get("error"):  # fail-safe: escalate if Jev errors
+                escalate.append(e)
+                print(f"[blue] jev: {e['ip']} {e['method']} {e['path']} -> "
+                      f"malicious={v.get('malicious')} type={v.get('attack_type')} "
+                      f"score={v.get('malicious_score')}", flush=True)
+        if escalate:
+            print(f"[blue] {len(escalate)} confirmed-suspicious -> main agent", flush=True)
             try:
-                analyse(client, suspicious)
+                analyse(client, escalate)
             except Exception as e:
                 print(f"[blue] analyse error: {e}", file=sys.stderr, flush=True)
         time.sleep(POLL)

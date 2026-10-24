@@ -26,7 +26,10 @@ client = httpx.AsyncClient(base_url=DVWA_URL, follow_redirects=False, timeout=15
 # hop-by-hop headers we must not forward verbatim
 HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer",
        "upgrade", "proxy-authorization", "proxy-authenticate",
-       "content-length", "host"}
+       "content-length", "host",
+       # httpx already decompresses up.content, so a forwarded Content-Encoding
+       # header would make the client double-decode. Strip it both ways.
+       "content-encoding"}
 
 # compiled-rule cache, refreshed when state.json's mtime changes
 _cache = {"mtime": -1.0, "state": store.DEFAULT_STATE, "rules": []}
@@ -114,6 +117,8 @@ async def proxy(path: str, request: Request):
 
     # 3. forward to DVWA
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+    fwd_headers["accept-encoding"] = "identity"  # no compression: keeps responses
+    #                                              plaintext for logging/inspection
     try:
         up = await client.request(request.method, "/" + path,
                                   params=dict(request.query_params),

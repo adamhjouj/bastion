@@ -41,8 +41,8 @@ attacker down, virtually patched the hole, and emailed us — live."*
           │                                ▼
           │                ┌──────────────────────────────────────────────┐
           │                │          blue_agent.py (loop)                 │
-          │                │  tail events → regex pre-filter → Claude      │
-          │                │  (tools) → execute → mutate state / email     │
+          │                │  tail → regex pre-gate → Jev (system-1) →     │
+          │                │  Claude (system-2, tools) → state / email     │
           │                └───────────────┬──────────────────────────────┘
           │        ┌──────────────┬─────────┴────────┬───────────────────────┐
           │        ▼              ▼                  ▼                       ▼
@@ -99,6 +99,12 @@ Per-request logic in the catch-all:
 5. Otherwise **forward** (hop-by-hop headers stripped both ways), log the real
    upstream status, return the response. Upstream errors → `502`.
 
+The forward request forces `Accept-Encoding: identity` and `Content-Encoding` is
+stripped from the response. This fixes a real bug — DVWA gzips for browsers,
+httpx auto-decodes `up.content`, so forwarding the stale `Content-Encoding: gzip`
+header made clients double-decode (garbled pages). Identity upstream also keeps
+responses plaintext for future response-body inspection.
+
 Rule compilation is cached and refreshed only when `state.json`'s mtime changes,
 so blue-agent writes take effect within one request with no restart.
 
@@ -107,12 +113,18 @@ A standalone process (not inside the proxy — keeps slow LLM calls out of the
 request path).
 - **`main()`** polls `events.jsonl` every 1s from an offset, starting at the
   current end so a restart doesn't replay history.
-- **Pre-filter** `is_suspicious(ev)` — one case-insensitive regex over
-  path+query+body covering SQLi / command-injection / traversal / XSS tokens
-  (`union\s+select`, `or 1=1`, `;`, `|`, `$(`, backticks, `/etc/passwd`, `../`,
-  `<script`, …). Only matches reach Claude, which is what makes "24/7" cheap.
-  Already-blocked IPs are skipped (cool-down), so one attack ≠ an alert storm.
-- **`analyse(client, events)`** — sends the suspicious batch + the current
+- **Two-stage triage** before the heavy model:
+  1. **Regex pre-gate** `is_suspicious(ev)` — one case-insensitive regex over
+     path+query+body (`union\s+select`, `or 1=1`, `;`, `$(`, `/etc/passwd`, `../`,
+     `<script`, …). Free; keeps Jev/Claude off obvious benign traffic. Toggle
+     `USE_REGEX_PREGATE=0` for pure-LLM. Already-blocked IPs are skipped (cool-down).
+  2. **System-1 classifier** `classify_request(ev)` (see `classifier.py`) — Jev
+     scores each pre-gated request malicious/benign + attack type. Only
+     confirmed-malicious (or a Jev error — fail-safe) escalate to Claude, and the
+     verdict is attached to the event. Auto-off if `TYPESAFE_API_KEY` is unset
+     (falls back to regex-only).
+- **`analyse(client, events)`** — sends the suspicious batch (each with its Jev
+  verdict, advisory) + the current
   defenses to Claude (`claude-sonnet-5`, `output_config={"effort":"low"}`,
   `max_tokens=4096`) with three tools, runs a manual tool-use loop
   (`stop_reason=="tool_use"` → execute → feed results back → repeat until
@@ -130,6 +142,22 @@ request path).
   kill the loop.
 - System prompt instructs tight WAF regexes (match payload tokens, not broad
   patterns), no duplicate actions, do-nothing on benign traffic.
+
+### `classifier.py` 🔑  — system-1 triage (TypeSafe Jev)
+Fast, cheap malicious/benign classification that gates the expensive blue agent.
+- **`classify_request(event)`** — raw REST `POST https://api.typesafe.ai/v1/systemone`
+  (via `httpx`; chosen over the SDK because the docs' SDK method names were
+  inconsistent while the REST shape is exact). Sends the request rendered as
+  `state` plus two Jev questions: a **Noul** ("is this malicious?" → probability)
+  and a **Choice** (attack type: sqli / cmdi / xss / traversal / benign).
+- Returns `{malicious, malicious_score, attack_type, type_confidence, probabilities}`.
+  `malicious = noul ≥ MALICIOUS_THRESHOLD` (default 0.5); if flagged malicious but
+  the top Choice is "benign", the best non-benign type is used.
+- **`parse_answers()`** is pure (no network) and unit-tested against the documented
+  response shape. On API error, returns `{error, malicious: None}` so the loop
+  fails safe (escalates a regex-flagged request rather than dropping it).
+- Config: `TYPESAFE_API_KEY`, `JEV_URL`, `JEV_MODEL`, `MALICIOUS_THRESHOLD`.
+- `python classifier.py` runs a built-in SQLi + benign sample live for a smoke test.
 
 ### `bootstrap_dvwa.py` ✅  — DVWA auth plumbing (reused)
 Removes the #1 demo-day failure (uninitialised DVWA DB).
@@ -225,16 +253,22 @@ attack is the visual payoff.
   - denylisted IP → `403` (`matched:"denylist"`)
   - different IP + `UNION SELECT` payload → `403` (`matched:"block SQLi UNION"`)
   - URL-encoded payloads decode correctly in the log and match WAF rules.
+  - Response compression fix: a browser-style gzip request through the proxy
+    returns clean plaintext with no `Content-Encoding` header (no double-decode).
 - `test_pipeline.py` → **ALL PASSED**: pre-filter classification; full `analyse()`
   with a **stubbed LLM** driving real tool dispatch → `state.json` updated,
   incident recorded, and a **real email delivered to MailHog**.
+- `classifier.parse_answers()` verified against the documented Jev response shape
+  (malicious SQLi, benign, and the high-score-but-choice-benign fallback); Jev
+  endpoint reachable (403 without a key = correct URL).
 - `output_config` / `system` / `tools` confirmed accepted by anthropic 2.3.0's
   `messages.create` signature.
 
-**Implemented, needs `ANTHROPIC_API_KEY` to run live (🔑):**
-- Blue agent's real Claude *classification* (the dispatch around it is proven;
-  only the model's judgment is untested live).
-- Red agent actually discovering/exploiting via Claude.
+**Implemented, needs a key to run live (🔑):**
+- Jev classification live (`TYPESAFE_API_KEY`) — `python classifier.py` smoke test.
+- Blue agent's real Claude *classification* and the red agent's exploitation
+  (`ANTHROPIC_API_KEY`) — the dispatch/loop around both is proven; only the model
+  judgment is untested live.
 
 The one self-test: `.venv/bin/python test_pipeline.py` (needs MailHog on :1025).
 
