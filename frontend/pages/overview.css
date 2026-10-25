@@ -66,6 +66,7 @@
 .wall-core .gic { width: 36px; height: 36px; border-radius: 8px; }
 .wall-core .gic svg { width: 19px; height: 19px; }
 .wall-core .gname { font-size: 14px; }
+.wall-label { position: absolute; top: 20px; left: calc(50% + 12px); font-size: 11px; color: var(--t-40); pointer-events: none; }
 /* Shield reacts in colour only while adjudicating — reads under reduced motion too. */
 .wall.is-processing .wall-core .gic { animation: shield-think 1.3s ease-in-out infinite; }
 @keyframes shield-think {
@@ -83,8 +84,10 @@
 /* node positions (percent of stage) */
 /* flow reads left -> right: internet | Bastion wall | server / honeypot.
    41px = (128px card - 46px source circle) / 2 keeps the outer edges symmetric. */
-.n-src { left: 16%; top: 50%; }
-.n-bastion { left: 50%; top: 50%; }
+.n-src { left: 10%; top: 50%; }
+.n-jev { left: 46%; top: 50%; z-index: 4; }
+.n-firewall { left: 46%; top: 50%; width: 2px; pointer-events: none; }
+.n-bastion { left: 61%; top: 50%; }
 .n-server { left: calc(84% - 41px); top: 78%; }
 .n-honeypot { left: calc(84% - 41px); top: 22%; }
 .n-server, .n-honeypot { width: 128px; }
@@ -110,9 +113,12 @@
 }
 /* narrow stage: pull the stations in so nothing overlaps the wall */
 @media (max-width: 480px) {
-  .n-src { left: 90%; }
-  .n-bastion { left: 60%; }
-  .n-server, .n-honeypot { left: 70px; width: 112px; }
+  .n-src { left: 9%; }
+  .n-jev { left: 47%; }
+  .n-firewall { left: 47%; }
+  .n-bastion { left: 67%; }
+  .n-server, .n-honeypot { left: 78%; width: 112px; }
+  .n-jev .gic, .n-bastion .gic { display: none; }
   .wall { width: 120px; }
   .wall-core { padding: 10px 12px 10px 10px; gap: 8px; }
   .wall-core .gic { width: 32px; height: 32px; }

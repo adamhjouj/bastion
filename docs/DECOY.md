@@ -76,8 +76,25 @@ On every decoy hit, in order, first success wins:
    the page is HTML without the site's title suffix. Time-boxed by `DECOY_LLM_TIMEOUT` (8 s) via
    `asyncio.wait_for`, ≤ `DECOY_LLM_CONCURRENCY` (4) in flight, `DECOY_LLM_PER_MINUTE` (30) budget.
    Accepted output is skeletonised and kept as an in-memory *synthesised template* so later
-   sessions get it without a second call.
-4. **Fallback** — the learned 404 variant (framework-looking error page), else the static page.
+   sessions get it without a second call. The model is **never allowed to author a `404`**: a
+   not-found answer is discarded (it is nondeterministic and would re-open the 404 tell on a real
+   but unlearned route) and the request falls through to the deterministic stages below, which own
+   "not found".
+4. **Prefix-aware section gate** (deterministic, LLM-free) — only for an unknown path whose
+   normalised route *shares a path prefix* (≥ 1 leading segment) with learned routes, i.e. the app
+   clearly has a section there. If that section is **auth-gated** — inferred from the learned shape,
+   by a learned sign-in form under the same prefix, or by siblings that redirect anonymous visitors
+   to one — the decoy mirrors the gate the real app shows anonymous visitors (the learned sign-in
+   page at its learned status: a `200` render or a `302` redirect) instead of a `404`. A real app
+   never `404`s a route that exists; a diverted attacker probing real in-section routes (`/area/x`)
+   must not be able to use the decoy's `404` as a route-existence oracle. Only anonymous `GET`/`HEAD`
+   is mirrored (a signed-in visitor, or a non-gated section, is left to fall through). Everything is
+   read from the learned shape — no brand, route name or prefix is ever hard-coded, so it
+   generalises to any app. With a key this is a safety net behind stage 3 (the LLM reconstructs the
+   specific page first, and any `404` it tries is discarded into this stage); with `DECOY_LLM=0` it
+   is the primary way in-section probes avoid a `404`.
+5. **Fallback** — the learned 404 variant (framework-looking error page) for truly-unknown paths
+   (no shared prefix, e.g. `/wp-login.php`, random scanner paths), else the static page.
 
 **Login.** A route whose GET template has a `type=password` input is the login form. A POST there
 fails plausibly (re-render the form; status from the learned POST variant if one exists) until the
@@ -164,7 +181,9 @@ subset (`cache-control`/`pragma`/`expires`) of the nearest real page.
 ## 7. What it can and cannot imitate yet
 
 Can: the site chrome and markup of every route seen (passively or crawled), status codes
-including redirects and the framework's own 404/405 pages, `Server`/`X-Powered-By`, cookie names
+including redirects and the framework's own 404/405 pages, an auth-gated section's sign-in for
+*unlearned* paths under a learned prefix (so a real but not-yet-learned route no longer answers
+with the tell-tale 404 while the real app serves its sign-in), `Server`/`X-Powered-By`, cookie names
 with per-visitor values, CSRF-style hidden tokens, JSON shapes, reflected parameters (escaped),
 a plausible login failure → fake grant → the pages real signed-in users were seen on, and —
 with a key — unknown routes rendered in the app's layout.
@@ -179,6 +198,13 @@ Cannot yet:
 - Timing on the first hit of an unknown route when the LLM is used (1.5–2.5 s observed); later
   sessions get the synthesised template instantly. `HONEYPOT_DELAY` masks this if set.
 - Synthesised templates live in memory; a restart re-synthesises on first hit.
+- The *exact* route table of an auth-gated section: the decoy cannot tell an unlearned-but-real
+  route from a non-existent one (it never saw either), so the prefix-aware gate presents the whole
+  section as sign-in — it answers `200` sign-in for in-section paths that the real app happens to
+  `404`. This is a deliberate trade: it removes the `404` route-existence oracle on the real routes
+  an attacker actually probes, and it reads as a coherent catch-all-gated section (a common app
+  shape); the diverted attacker has no reference to the real app to notice the difference. Only the
+  learned routes and the section's real sign-in behaviour are reproduced faithfully.
 
 
 ---
@@ -191,15 +217,39 @@ real app it fronts:
   learned per boot — never a hard-coded brand.
 - Learned routes match real responses: /console/netcheck -> "Sign in", /console/logout ->
   "Operator handbook" (identical title + status to the real app).
-- Unknown/unlearned paths return the learned, consistent 404 ("Not found – Helios Intranet").
+- Truly-unknown paths with no shared prefix (/wp-login.php, /xyz-random) return the learned,
+  consistent 404 ("Not found – Helios Intranet").
 
 Old hard-coded "Acme Internal Portal" fallback REMOVED (bastion/decoy/static.py). Replaced with
 fallback_page(shape): uses the learned title when known, else a brand-less "Sign in" holding page.
 Verified live: warm path has no Acme; cold start (empty learner + no LLM) is brand-less, no tells.
 
-Known coverage gap (improvement, not a tell): routes the learner has not yet observed return a
-consistent 404 instead of the real app's 200. Closing it fully needs the LLM-synthesis path (for
-unknown routes under a known prefix) and/or authenticated crawl coverage — the LLM path is
-currently rate-limited by the Anthropic/DeepSeek workspace quota (regains 2026-11-01), so synthesis
-of never-seen routes could not be exercised this session. The learned-template path (the core of
-the reverse-engineering) is fully working.
+---
+## Prefix-aware section gate (2026-10-31, live, LLM path restored)
+
+The previous coverage gap is closed. A diverted attacker probing a **real but not-yet-learned**
+route under a learned, auth-gated section used to get the decoy's 404 while the real app returned
+200 sign-in — a distinguishability tell on exactly the routes an attacker targets.
+
+The real app (this boot) was characterised directly: it serves `200` sign-in for routes that
+exist and are auth-gated (`/console/library`, `/console/reader`, `/console/ping`, `/console/netcheck`),
+`200` content for non-gated ones (`/console/logout` → "Operator handbook"), and `404` for paths that
+do not exist (even under `/console`: `/console/home`, `/console/zzz-unseen`). The decoy cannot tell
+an unlearned-real route from a non-existent one, so it mirrors the section's sign-in for every
+in-prefix anonymous probe (see §2 stage 4) — inferred from the learned shape (login form / nearest
+sibling / siblings' redirect), never hard-coded to `/console` or any brand/route name.
+
+Verified live (real `http://dvwa:80` vs decoy, both LLM ON and `DECOY_LLM=0`):
+- `/console/library?id=1`, `/console/reader?q=x`, `/console/ping` — real **200 "Sign in"**, decoy
+  now **200 "Sign in"** (was 404). LLM-off path serves it deterministically (`source=section`);
+  LLM-on path serves it via the model or, when the model tries a 404, via the same section gate.
+- `/wp-login.php`, `/xyz-random` (no shared prefix) — decoy stays on the consistent learned 404.
+- Trade (§7): in-section paths the real app happens to `404` (`/console/zzz-unseen`) now answer
+  `200` sign-in; the decoy reads as a catch-all-gated section and denies the route-existence oracle,
+  and the diverted attacker has no real-app reference to see the difference.
+
+Eval harness (`--holdout --llm --judge --rounds 5`, DeepSeek): learned `structural` **1.000**,
+held-out route via LLM **0.976** (≥ the 0.967 baseline), `judge_accuracy` **0.45** (shift **0.05**,
+closer to the 0.5 chance line than the prior 0.35 baseline — indistinguishable). The LLM is no
+longer permitted to author a 404 (§2 stage 3): a not-found is discarded into the deterministic
+stages, so in-section probes never flap between 200 and 404 across sessions.

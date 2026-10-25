@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bastion. A first responder for your web app</title>
 <meta name="description" content="Bastion fronts your web app, judges every request with no training on your logs, contains an attack itself and writes each move to a hash-chained log you can undo.">
-<meta name="theme-color" content="#ecebe7">
+<meta name="theme-color" content="#ffffff">
 <link rel="icon" type="image/png" sizes="512x512" href="assets/icon-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -17,14 +17,14 @@
 <body>
 
 <header class="top wrap">
-  <a class="wordmark" href="#top" aria-label="Bastion, home"><span class="wordmark__mark" aria-hidden="true"></span>Bastion</a>
+  <a class="wordmark" href="#top" aria-label="Bastion, home" draggable="false"><img class="wordmark__mark" src="assets/logo.png" alt="" width="22" height="23" decoding="async" draggable="false">Bastion</a>
   <nav aria-label="Sections">
     <a href="#how">How it works</a>
     <a href="#actions">Actions</a>
     <a href="#undo">Undo</a>
     <a href="#questions">Questions</a>
   </nav>
-  <a class="button" href="#pilot">Request a pilot</a>
+  <a class="button" href="/__dash#/overview">Open console</a>
 </header>
 
 <main id="top">
@@ -36,13 +36,13 @@
         <span class="line"><span data-line style="--i:1">for your web app</span></span>
       </h1>
       <p class="lead" data-rise style="--i:2">Bastion fronts your web app, judges every request with no training on your logs, contains an attack itself and logs each move so you can undo it.</p>
-      <a class="button" href="#pilot" data-rise style="--i:3">Request a pilot</a>
+      <a class="button" href="/__dash#/overview" data-rise style="--i:3">Open console</a>
     </div>
 
     <div class="stage">
       <div class="stage__inner">
         <div class="demo" data-ui id="demo">
-          <div class="demo__head"><span>Live request</span><span class="demo__live">agent · live</span></div>
+          <div class="demo__head"><span>Request demo</span><span class="demo__caption">Local simulation</span></div>
           <form class="demo__pick" id="demo-form" autocomplete="off">
             <div class="demo__chips" role="group" aria-label="Sample requests">
               <button type="button" data-req="/products?id=42"><code>/products?id=42</code></button>
@@ -59,12 +59,13 @@
           </form>
           <div class="demo__route" aria-hidden="true">
             <svg viewBox="0 0 592 150" preserveAspectRatio="none">
-              <path id="leg-in" d="M 96 75 L 250 75"></path>
+              <path id="leg-in" d="M 96 75 L 197 75"></path>
+              <text class="demo__ingress" id="ingress-label" x="146" y="62" text-anchor="middle">Bastion</text>
               <path id="leg-server" d="M 342 75 C 400 75 430 30 504 30"></path>
               <path id="leg-decoy" d="M 342 75 C 400 75 430 120 504 120"></path>
             </svg>
             <div class="node node--internet"><b>Internet</b><span>source</span></div>
-            <div class="node node--bastion"><b>Bastion</b><span id="node-bastion-state">screening</span></div>
+            <div class="node node--jev"><b>Jev</b><span id="node-jev-state">screening</span></div>
             <div class="node node--server"><b>Server</b><span>your app</span></div>
             <div class="node node--decoy"><b>Decoy</b><span>honeypot</span></div>
             <div class="demo__dot" id="demo-dot"></div>
@@ -180,7 +181,7 @@
           <h3>The report</h3>
           <p>Each incident is mailed to a person: what the agent saw, what it did, and a link to the case file where any action can be undone. As virtual patches harden the app, the reports should thin out. That is the aim.</p>
         </div>
-        <a class="button button--pale" href="#pilot" data-reveal style="--i:3">Request a pilot</a>
+        <a class="button button--pale" href="/__dash#/overview" data-reveal style="--i:3">Open console</a>
       </div>
     </div>
   </section>
@@ -227,14 +228,6 @@
     </div>
   </section>
 
-  <section id="pilot" class="cta wrap" aria-labelledby="cta-title">
-    <h2 id="cta-title" class="sr-only">Request a pilot</h2>
-    <form class="cta__form" id="cta-form" action="mailto:hello@bastion.example" method="get">
-      <p class="cta__sentence" data-reveal>Put it in front of <label><span class="sr-only">Your application’s hostname</span><input class="cta__field" id="cta-app" name="app" type="text" placeholder="app.example.com" autocomplete="url"></label> and <button class="cta__send" type="submit">write to us</button></p>
-    </form>
-    <p class="cta__after" data-reveal style="--i:1">Opens your mail client with the address filled in. We answer by hand.</p>
-  </section>
-
 </main>
 
 <footer class="foot wrap on-field">
@@ -249,12 +242,11 @@
       <a href="#questions">Questions</a>
     </nav>
     <div class="foot__contact">
-      <p><a href="mailto:hello@bastion.example">hello@bastion.example</a></p>
       <p>Runs in front of your app, wherever it runs.</p>
     </div>
     <div class="foot__last">
       <p class="foot__brand"><img src="assets/logo.png" width="22" height="23" alt="" decoding="async">© 2026 Bastion</p>
-      <a class="button button--pale" href="#pilot">Request a pilot</a>
+      <a class="button button--pale" href="/__dash#/overview">Open console</a>
     </div>
     <p class="credits">Pictures: <a href="https://commons.wikimedia.org/wiki/File:Vierde_plaat_met_de_vijfhoek_in_de_vestingbouw,_1693,_RP-P-OB-83.033A-10.jpg">“Vierde plaat met de vijfhoek in de vestingbouw, 1693”</a> and <a href="https://commons.wikimedia.org/wiki/File:Toepassing_van_de_vijfhoek_in_de_vestingbouw,_1726_Definitions_des_Anges_%26_des_c%C3%B4tes_du_pentagone_fortifi%C3%A9_%C3%A0_simples_Bastions_(titel_op_object)_Les_Forces_de_l%27Europe,_Asie,_Afrique_et_Amerique_Comm,_RP-P-OB-83.035-8.jpg">“Toepassing van de vijfhoek in de vestingbouw, 1726”</a>, Rijksmuseum, <a href="https://creativecommons.org/publicdomain/zero/1.0/deed.en">CC0</a>, via Wikimedia Commons. The interface pictures are Bastion’s own dashboard.</p>
   </div>

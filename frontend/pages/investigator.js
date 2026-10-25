@@ -34,7 +34,6 @@ const TEMPLATE = `
         <h2>Audit ledger</h2>
         <span class="lg-tools">
           <span class="lg-chip" data-chip data-state="busy"><span class="d" aria-hidden="true"></span><span data-chip-text>Verifying…</span></span>
-          <button class="btn lg-verify" type="button" data-verify disabled>Verify</button>
         </span>
       </div>
       <div class="panel-body" data-ledger><div class="empty">No actions recorded.</div></div>
@@ -256,11 +255,11 @@ export function mount(root) {
   const ledgerBody = page.querySelector("[data-ledger]");
   const ledger = makeStream(ledgerBody, LEDGER_CAP, ledgerNode);
   let ledgerHas = false;
+  let lastLedgerId;   // re-verify integrity automatically when the log grows (no manual button)
 
   /* audit verify chip + head hash */
   const chip = page.querySelector("[data-chip]");
   const chipText = page.querySelector("[data-chip-text]");
-  const verifyBtn = page.querySelector("[data-verify]");
   const headBtn = page.querySelector("[data-head]");
   const headHash = page.querySelector("[data-head-hash]");
   const copyState = page.querySelector("[data-copy-state]");
@@ -274,26 +273,26 @@ export function mount(root) {
     headHash.textContent = fullHead ? fullHead.slice(0, 12) + "…" + fullHead.slice(-4) : "";
     copyState.textContent = "copy";
   }
+  let verifying = false;
   async function verify() {
-    if (!alive) return;
-    verifyBtn.disabled = true;
+    if (!alive || verifying) return;
+    verifying = true;
     setChip("busy", "Verifying…");
     let r = null, v = null;
     try {
       r = await fetch(API + "/audit/verify", { credentials: "same-origin" });
       if (r.ok) v = await r.json();
     } catch (_) {}
+    verifying = false;
     if (!alive) return;
     if (r && r.status === 404) { /* backend not shipped: show nothing actionable */
-      setChip("none", "Verification unavailable"); verifyBtn.hidden = true; setHead(null); return;
+      setChip("none", "Verification unavailable"); setHead(null); return;
     }
-    verifyBtn.hidden = false; verifyBtn.disabled = false;
     if (!v) { setChip("none", "Couldn't verify"); return; }
     setHead(v.head);
     if (v.intact) setChip("ok", "Log verified · " + fmt(v.length || 0) + " actions");
     else setChip("broken", "Integrity broken at #" + (v.broken_at != null ? v.broken_at : "?"));
   }
-  verifyBtn.addEventListener("click", verify);
   headBtn.addEventListener("click", async () => {
     if (!fullHead) return;
     let ok = false;
@@ -346,6 +345,9 @@ export function mount(root) {
     if (!rows.length) {
       if (ledgerHas) { ledger.reset(); ledgerBody.appendChild(el("div", "empty", "No actions recorded.")); ledgerHas = false; }
     } else { ledgerHas = true; ledger.syncNewestFirst(rows); }
+    const topId = rows.length ? rows[0].a.id : null;
+    if (lastLedgerId !== undefined && topId !== lastLedgerId) verify();
+    lastLedgerId = topId;
     updateDefenses(page, s);
   });
 

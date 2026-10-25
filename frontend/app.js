@@ -10,11 +10,12 @@ import { mount as investigator } from "./pages/investigator.js";
 import { mount as attacker } from "./pages/attacker.js";
 
 const ROUTES = {
-  "/": { title: "Overview", mount: overview },
+  "/overview": { title: "Overview", mount: overview },
   "/incidents": { title: "Incidents", mount: incidents },
   "/investigator": { title: "Investigator", mount: investigator },
   "/attacker": { title: "Attacker", mount: attacker },
 };
+const DEFAULT_ROUTE = "/overview";  // the logo leaves the SPA for /__home; Overview is its own route
 
 const view = document.getElementById("view");
 let unmount = null;
@@ -25,8 +26,8 @@ function routeInfo() {
   const h = (location.hash || "").replace(/^#/, "");
   const [pathPart, query = ""] = h.split("?");
   const segs = pathPart.replace(/^\/+/, "").split("/").filter(Boolean);
-  const path = segs.length ? "/" + segs[0] : "/";
-  if (!ROUTES[path]) return { path: "/", sub: "", query };
+  const path = segs.length ? "/" + segs[0] : DEFAULT_ROUTE;
+  if (!ROUTES[path]) return { path: DEFAULT_ROUTE, sub: "", query };
   return { path, sub: segs.slice(1).map(decodeURIComponent).join("/"), query };
 }
 let current = { path: null, sub: null };
@@ -43,6 +44,12 @@ function render() {
   current = { path: info.path, sub: info.sub };
   document.querySelectorAll(".nav-item").forEach((a) => a.classList.toggle("is-active", a.dataset.route === info.path));
   try { unmount = route.mount(view, { sub: info.sub, query: info.query }) || null; } catch (e) { view.appendChild(Object.assign(document.createElement("div"), { className: "empty", textContent: "This view failed to load." })); }
+}
+
+// Normalise a bare hash to the explicit Overview route so the address bar and active-nav
+// reflect it (the logo now points out of the SPA at the marketing home, /__home/).
+if (!location.hash || location.hash === "#" || location.hash === "#/") {
+  history.replaceState(null, "", "#" + DEFAULT_ROUTE);
 }
 
 window.addEventListener("hashchange", render);

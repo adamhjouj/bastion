@@ -77,6 +77,65 @@ def test_anonymous_gets_redirect_variant_then_fake_login_grants_authenticated_ar
     assert after.status == 200 and "Welcome back" in after.body.decode() and "s.haddad" not in after.body.decode()
 
 
+def test_unknown_route_under_auth_gated_section_serves_signin_without_llm():
+    # A real but not-yet-learned path under a learned auth-gated area: the real app shows its
+    # sign-in for any /console/* while unauthenticated. The decoy must mirror that (200 sign-in),
+    # deterministically with the LLM OFF, instead of the generic 404 — that 404 was a tell.
+    d = Decoy(lambda: learned_shape(), Sessions(salt="t"), llm_enabled=False)
+    for path, query in (("/console/library", "id=1"), ("/console/reader", "q=x"), ("/console/zzz-unseen", "")):
+        r = _run(d.respond(_req("GET", path, query=query)))
+        body = r.body.decode()
+        assert r.status == 200 and r.source == "section", (path, r.status, r.source)
+        assert "Sign in" in body and "Helios Intranet" in body
+        assert "b2356a4037a6c0b3ca5e8d146cde8b16" not in body  # the hidden token is a slot, not raw
+    assert d.stats["section"] == 3
+
+
+def test_section_gate_ignores_bogus_paths_and_non_gated_sections():
+    d = Decoy(lambda: learned_shape(), Sessions(salt="t"), llm_enabled=False)
+    # No shared prefix with any learned route → consistent learned 404 (not a fabricated page).
+    for bogus in ("/wp-login.php", "/xyz-random", "/.git/config"):
+        r = _run(d.respond(_req("GET", bogus)))
+        assert r.status == 404 and r.source == "error_template", bogus
+    # A learned section with no auth gate (plain JSON api) → unknown paths there still 404.
+    r = _run(d.respond(_req("GET", "/api/zzz")))
+    assert r.status == 404 and r.source == "error_template"
+    # A signed-in visitor hitting a non-existent page in the area sees the real 404, not a sign-in.
+    session = d.sessions.get("10.0.0.1", "curl/8.0")
+    session.auth = "admin"
+    r = _run(d.respond(_req("GET", "/console/zzz-unseen"), session=session))
+    assert r.status == 404 and r.source == "error_template"
+    assert d.stats["section"] == 0
+
+
+def test_llm_404_is_discarded_for_in_section_path_and_section_gate_answers():
+    # The model must never author "not found": a 404 it returns for a real but unlearned in-section
+    # route is nondeterministic and re-opens the tell. It is discarded and the deterministic section
+    # gate serves the sign-in instead; a plausible non-404 page is kept.
+    def llm_404(system, user):
+        return json.dumps({"status": 404, "content_type": "text/html",
+                           "body": "<html><title>Not found &ndash; Helios Intranet</title></html>"})
+    d = Decoy(lambda: learned_shape(), Sessions(salt="t"), llm_fn=llm_404, llm_enabled=True)
+    r = _run(d.respond(_req("GET", "/console/library", query="id=1")))
+    assert r.status == 200 and r.source == "section" and "Sign in" in r.body.decode()
+    assert d.stats["llm"] == 0  # the 404 was not counted as a synthesis
+    # A no-prefix bogus path with an LLM 404 falls through to the consistent learned 404.
+    bogus = _run(d.respond(_req("GET", "/wp-login.php")))
+    assert bogus.status == 404 and bogus.source == "error_template"
+
+
+def test_section_gate_mirrors_redirect_style_auth_gate():
+    # An area whose known routes redirect anonymous visitors to a sign-in elsewhere: mirror the
+    # 302 (same gate), inferred from the learned shape — never hard-coded to a route name.
+    st = ShapeStore()
+    st.learn("GET", "/portal/home", "", 302, HDRS + [("location", "/signin")], b"")
+    st.learn("GET", "/signin", "", 200, HDRS, LOGIN.replace("/console/netcheck", "/signin").encode())
+    st.learn("GET", "/zzz", "", 404, HDRS, NOT_FOUND.encode())
+    d = Decoy(lambda: st, Sessions(salt="t"), llm_enabled=False)
+    r = _run(d.respond(_req("GET", "/portal/anything")))
+    assert r.status == 302 and r.source == "section" and dict(r.headers)["location"] == "/signin"
+
+
 def test_unknown_route_uses_learned_error_page_without_llm_and_static_without_shape():
     d = Decoy(lambda: learned_shape(), Sessions(salt="t"), llm_enabled=False)
     r = _run(d.respond(_req("GET", "/wp-login.php")))

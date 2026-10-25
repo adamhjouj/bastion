@@ -69,7 +69,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 /* Top bar: wordmark, four plain links, nothing else. The active link is the style's one
    selection mark: a 1px accent line exactly as wide as its label, on the bar's bottom rule. */
 .top { flex: 0 0 auto; display: flex; align-items: stretch; gap: 28px; height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--ground); }
-.brand { display: flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; flex: 0 0 auto; }
+.brand { display: flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; flex: 0 0 auto; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 .brand:focus-visible { outline: 2px solid var(--control); outline-offset: -2px; }
 .brand-mark { display: block; width: 22px; height: 22px; object-fit: contain; }
 .brand-word { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }

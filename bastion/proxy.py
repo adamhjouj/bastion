@@ -84,8 +84,13 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
 
     @app.middleware("http")
     async def management_boundary(request, call_next):
+        path = request.url.path
+        # /__home is the public marketing homepage: no auth, and a marketing CSP (it uses Google
+        # Fonts + one inline bootstrap script) instead of the dashboard's strict policy. Every
+        # other /__ path stays authenticated and locked down.
+        public_home = path.startswith("/__home")
         # DASHBOARD_NO_AUTH=1 (dev convenience) leaves the whole /__ boundary open.
-        if request.url.path.startswith("/__") and not policy.dashboard_no_auth:
+        if path.startswith("/__") and not public_home and not policy.dashboard_no_auth:
             try:
                 authorize(request, policy.management_token)
             except HTTPException as exc:
@@ -93,7 +98,15 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        if request.url.path.startswith("/__"):
+        if public_home:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                "font-src 'self' https://fonts.gstatic.com; "
+                "script-src 'self' 'sha256-Du+OJKJSbdUgz5nrHeWWINvez6XKDDU/tyj/5c2uvwo='; "
+                "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+            )
+        elif path.startswith("/__"):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
         return response

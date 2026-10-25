@@ -33,10 +33,9 @@ const TEMPLATE = `
   <section class="stage" data-ui aria-label="Live request lifecycle">
     <canvas data-canvas></canvas>
     <div class="gnode src n-src" data-node="src"><span class="gic">${ICON.src}</span><span class="ntag">internet</span></div>
-    <div class="wall n-bastion" data-node="bastion">
-      <span class="wall-beam"></span>
-      <span class="wall-core"><span class="gic">${ICON.bastion}</span><span class="gmeta"><span class="gname">Bastion</span><span class="gcount" data-c="bastion">0</span></span><span class="ntag">defense</span></span>
-    </div>
+    <div class="gnode n-jev" data-node="jev"><span class="gic">${ICON.bastion}</span><span class="gmeta"><span class="gname">Jev</span></span><span class="ntag">classifier</span></div>
+    <div class="wall n-firewall" aria-hidden="true"><span class="wall-beam"></span></div>
+    <div class="gnode n-bastion" data-node="bastion"><span class="gic">${ICON.bastion}</span><span class="gmeta"><span class="gname">Bastion</span><span class="gcount" data-c="bastion">0</span></span><span class="ntag">defense</span></div>
     <div class="gnode n-server" data-node="server"><span class="gic">${ICON.server}</span><span class="gmeta"><span class="gname">Server</span><span class="gcount" data-c="server">0</span></span><span class="ntag">safe</span></div>
     <div class="gnode n-honeypot" data-node="honeypot"><span class="gic">${ICON.honeypot}</span><span class="gmeta"><span class="gname">Honeypot</span><span class="gcount" data-c="honeypot">0</span></span><span class="ntag">diverted</span></div>
     <div class="legend" aria-hidden="true"><span><i class="d safe"></i>safe</span><span><i class="d threat"></i>suspicious</span></div>
@@ -68,7 +67,8 @@ function createScene(root) {
   });
   /* test/instrumentation hooks: displayed counts + per-dot arrival log */
   window.__nodeCounts = {}; window.__arrivalLog = [];
-  const CONNS = [["src", "bastion", 0.0, false], ["bastion", "server", -0.14, false], ["bastion", "honeypot", 0.14, true]];
+  const CONNS = [["src", "jev", 0.0, false], ["jev", "bastion", 0.0, false], ["bastion", "server", -0.14, false], ["bastion", "honeypot", 0.14, true]];
+  NODES.bastion.beam = root.querySelector(".wall-beam");
   const CMAP = {};
   for (const c of CONNS) CMAP[c[0] + ">" + c[1]] = { from: c[0], to: c[1], bow: c[2], hot: c[3], energy: 0, geo: null };
 
@@ -96,7 +96,7 @@ function createScene(root) {
      still: the counter tick is the arrival acknowledgment. */
   function ping(id, hot) {
     const n = NODES[id]; if (!n || id !== "bastion") return;
-    n.el.style.setProperty("--wall-rgb", hot ? "250,93,25" : "255,255,255");
+    root.querySelector(".wall").style.setProperty("--wall-rgb", hot ? "250,93,25" : "255,255,255");
     flares.push({ y: n.y, e: 0, hot: !!hot });
     anim(n.beam, [{ filter: "brightness(1)" }, { filter: "brightness(1.9)" }, { filter: "brightness(1)" }], { duration: 480, easing: "ease-out" });
     wake();
@@ -189,7 +189,7 @@ function createScene(root) {
     if (destroyed) { running = false; return; }
     const dt = Math.min(now - last, 60); last = now;
     spawnCd -= dt;
-    if (spawnBacklog > 0 && spawnCd <= 0) { spawnBacklog--; spawnCd = spawnGap; if (!spawn(["src", "bastion"], { mal: false, onDone: dotArrivedAtWall })) dotArrivedAtWall(); }
+    if (spawnBacklog > 0 && spawnCd <= 0) { spawnBacklog--; spawnCd = spawnGap; if (!spawn(["src", "jev", "bastion"], { mal: false, onDone: dotArrivedAtWall })) dotArrivedAtWall(); }
     /* enter -> count -> process -> dispatch: one dot holds the wall at a time.
        Its counter already ticked on arrival (dotArrivedAtWall); here we run the
        visible classify beat, and emit the onward dot only after it completes. */
@@ -216,7 +216,7 @@ function createScene(root) {
       ctx.lineWidth = 1.4; ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.stroke();
       if (c.energy > 0.01) { ctx.lineWidth = 1.4 + c.energy; ctx.strokeStyle = c.eh ? "rgba(250,93,25," + (0.18 + c.energy * 0.5).toFixed(3) + ")" : "rgba(255,255,255," + (0.16 + c.energy * 0.3).toFixed(3) + ")"; ctx.stroke(); }
     }
-    const jx = NODES.bastion ? NODES.bastion.x : 0;
+    const jx = root.querySelector(".wall").offsetLeft;
     for (const f of flares) { const a = 1 - f.e / 480; if (a <= 0) continue; const col = f.hot ? "250,93,25" : "255,255,255", h = (32 + (1 - a) * 50) * S; ctx.globalAlpha = a; ctx.strokeStyle = "rgba(" + col + "," + (a * 0.7).toFixed(3) + ")"; ctx.lineWidth = 2.5 * S; ctx.shadowBlur = 16 * S; ctx.shadowColor = "rgba(" + col + ",0.85)"; ctx.beginPath(); ctx.moveTo(jx, f.y - h); ctx.lineTo(jx, f.y + h); ctx.stroke(); ctx.shadowBlur = 0; ctx.globalAlpha = 1; }
     for (const p of particles) {
       const hot = p.mal;

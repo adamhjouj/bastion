@@ -1,5 +1,5 @@
 /* Bastion marketing page. Vanilla, no dependencies.
-   1. reveals  2. the live request demonstration  3. the action switches  4. the revert control  5. the mail form */
+   1. reveals  2. the request demonstration  3. the action switches  4. the revert control */
 (() => {
   'use strict';
   const calm = matchMedia('(prefers-reduced-motion: reduce)');
@@ -15,19 +15,20 @@
     revealed.forEach((el) => el.classList.add('is-in'));
   }
 
-  /* 2. the live request: pick or type a request, it travels Internet -> Bastion -> Server or Decoy.
+  /* 2. the request: Internet -> Bastion proxy -> Jev -> Server or Decoy.
         The verdict here is computed from a few fixed patterns; the product asks a zero-shot model. */
   const form = document.getElementById('demo-form');
   if (form) {
     const input = document.getElementById('demo-path');
     const chips = [...form.querySelectorAll('[data-req]')];
     const dot = document.getElementById('demo-dot');
-    const state = document.getElementById('node-bastion-state');
+    const state = document.getElementById('node-jev-state');
+    const ingressLabel = document.getElementById('ingress-label');
     const route = document.querySelector('.demo__route');
     const svg = route.querySelector('svg');
     const nodes = {
       internet: document.querySelector('.node--internet'),
-      bastion: document.querySelector('.node--bastion'),
+      jev: document.querySelector('.node--jev'),
       server: document.querySelector('.node--server'),
       decoy: document.querySelector('.node--decoy'),
     };
@@ -83,8 +84,10 @@
       const W = route.clientWidth, H = route.clientHeight;
       if (!W || !H) return;
       svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-      const i = rel(nodes.internet), g = rel(nodes.bastion), s = rel(nodes.server), d = rel(nodes.decoy);
+      const i = rel(nodes.internet), g = rel(nodes.jev), s = rel(nodes.server), d = rel(nodes.decoy);
       legs.in.setAttribute('d', `M ${i.r + GAP} ${i.cy} L ${g.l - GAP} ${g.cy}`);
+      ingressLabel.setAttribute('x', (i.r + g.l) / 2);
+      ingressLabel.setAttribute('y', i.cy - 13);
       legs.server.setAttribute('d', curve(g, s));
       legs.decoy.setAttribute('d', curve(g, d));
       P.source = [i.r + GAP, i.cy]; P.gate = [g.l - GAP, g.cy]; P.exit = [g.r + GAP, g.cy];
@@ -137,7 +140,7 @@
       await wait(720);
       if (id !== run) return;
       legs.in.classList.add('is-lit');
-      nodes.bastion.classList.add(v.malicious ? 'is-heat' : 'is-on');
+      nodes.jev.classList.add(v.malicious ? 'is-heat' : 'is-on');
       state.textContent = v.malicious ? `judged ${v.score.toFixed(2)} · ${v.type}` : `judged ${v.score.toFixed(2)} · benign`;
       layoutRoute();
       if (v.malicious) dot.classList.add('is-heat');
@@ -211,15 +214,4 @@
     });
   }
 
-  /* 5. the mail form: opens the visitor's mail client with the subject and body written */
-  const cta = document.getElementById('cta-form');
-  if (cta) {
-    cta.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const app = document.getElementById('cta-app').value.trim() || 'our app';
-      const subject = encodeURIComponent(`Pilot: Bastion in front of ${app}`);
-      const body = encodeURIComponent(`Hello,\n\nWe would like to put Bastion in front of ${app}.\n\nStack and hosting:\nRough traffic:\nWho to talk to:\n`);
-      location.href = `mailto:hello@bastion.example?subject=${subject}&body=${body}`;
-    });
-  }
 })();

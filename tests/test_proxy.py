@@ -40,6 +40,24 @@ def test_observe_mode_forwards_all():
     asyncio.run(_run(_policy(), scenario))
 
 
+def test_marketing_home_is_public_with_marketing_csp():
+    """The /__home marketing page is public (no token) and served with a marketing CSP, while the
+    dashboard stays authenticated and strict. Assets resolve under the trailing-slash form."""
+    async def scenario(client):
+        r = await client.get("/__home")  # redirect to trailing slash so relative assets resolve
+        assert r.status_code == 308 and r.headers["location"] == "/__home/"
+        r = await client.get("/__home/")
+        assert r.status_code == 200 and b"Bastion" in r.content          # no management token needed
+        csp = r.headers.get("content-security-policy", "")
+        assert "fonts.googleapis.com" in csp and "sha256-" in csp and "script-src 'self'" in csp
+        assert (await client.get("/__home/site.css")).status_code == 200
+        assert (await client.get("/__home/assets/logo.png")).status_code == 200
+        assert (await client.get("/__home/nope.env")).status_code == 404   # unknown extension
+        dash = await client.get("/__dash")                                 # still gated
+        assert dash.status_code >= 400
+    asyncio.run(_run(_policy(), scenario))
+
+
 def test_active_ban_blocks():
     store.save_state({"denylist": [{"ip": "10.0.0.1", "expires": None}], "honeypot": []})
 

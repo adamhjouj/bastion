@@ -134,6 +134,37 @@ def test_honeypot_serves_learned_shape_with_fingerprint_headers(tmp_path, monkey
     assert all("honeypot" not in json.dumps(h).lower() or k == "source" for h in hits for k in h)
 
 
+def test_honeypot_section_gate_serves_signin_for_unlearned_console_path_llm_off(tmp_path, monkeypatch):
+    # Deterministic (LLM OFF) proof of the prefix-aware fix: an attacker diverted onto a REAL but
+    # not-yet-learned path under a learned auth-gated area gets the app's sign-in (200), the same as
+    # the real app — not the learned 404 that previously made the decoy distinguishable.
+    monkeypatch.setenv("DECOY_LLM", "0")
+    from bastion.decoy.shape import ShapeStore
+    st = ShapeStore()
+    login = ('<html><head><title>Sign in &ndash; Helios Intranet</title></head><body>'
+             '<form method="post" action="/console/netcheck"><input type="text" name="userid">'
+             '<input type="password" name="credential"><button>Sign in</button></form></body></html>')
+    st.learn("GET", "/console/netcheck", "", 200, LEARNED_HDRS, login.encode())
+    st.learn("GET", "/nope", "", 404, LEARNED_HDRS,
+             b'<html><head><title>Not found &ndash; Helios Intranet</title></head><body>No such page.</body></html>')
+    (tmp_path / "decoy").mkdir(exist_ok=True)
+    st.save(tmp_path / "decoy" / "passive.json")
+    from bastion.honeypot_app import app
+    app.state.shapes = None
+
+    async def scenario():
+        async with _client(app) as client:
+            for path in ("/console/library?id=1", "/console/reader?q=x", "/console/zzz-unseen"):
+                r = await client.get(path, headers={"X-Forwarded-For": "10.0.0.7", "User-Agent": "curl/8.0"})
+                assert r.status_code == 200 and "Sign in" in r.text and "Helios Intranet" in r.text, path
+            # A truly unrelated path (no shared prefix) still returns the consistent learned 404.
+            bogus = await client.get("/wp-login.php", headers={"X-Forwarded-For": "10.0.0.7"})
+            assert bogus.status_code == 404 and "No such page" in bogus.text
+    asyncio.run(scenario())
+    hits = store.read_jsonl(store.DATA / "honeypot_hits.jsonl")
+    assert [h["source"] for h in hits] == ["section", "section", "section", "error_template"]
+
+
 def test_honeypot_rate_limits_like_the_proxy(tmp_path, monkeypatch):
     from bastion import honeypot_app
     monkeypatch.setattr(honeypot_app.app.state, "limiter", honeypot_app._RateLimiter(limit=2, window=60))
