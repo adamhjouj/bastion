@@ -4,10 +4,12 @@ data/
 .git/
 __pycache__/
 *.pyc
+.pytest_cache/
 .pull.log
 node_modules/
 playwright-report/
 test-results/
-IMPLEMENTATION_PLAN.md
+tests/
+evals/
+pytest.ini
 architecture.md
-plans/

@@ -1,0 +1,85 @@
+/* Overview page — command center layout + the request-lifecycle graph. */
+.p-overview { height: 100%; }
+.ov { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
+
+/* KPI band */
+.ov-kpis { flex: 0 0 auto; display: grid; grid-template-columns: repeat(7, 1fr); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; background: var(--glass); box-shadow: var(--card-sh); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); overflow: hidden; }
+.ov-kpis .kpi { align-items: flex-start; padding: 12px 16px; border-right: 1px solid var(--line); gap: 4px; }
+.ov-kpis .kpi:last-child { border-right: 0; }
+
+/* Hero stage */
+.stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; border: 1px solid rgba(255,255,255,0.07); border-radius: 18px; background: radial-gradient(120% 120% at 50% 42%, rgba(255,255,255,0.028), rgba(255,255,255,0.006) 55%), var(--bg-2); box-shadow: var(--card-sh); }
+.stage canvas { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; }
+.legend { position: absolute; z-index: 4; left: 18px; bottom: 15px; display: flex; gap: 14px; font-size: 10px; letter-spacing: 0.04em; color: var(--t-40); pointer-events: none; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .d { width: 7px; height: 7px; border-radius: 50%; }
+.legend .d.safe { background: var(--t-56); }
+.legend .d.threat { background: var(--heat); box-shadow: 0 0 7px rgba(250,93,25,0.6); }
+
+/* Graph nodes */
+.gnode { position: absolute; transform: translate(-50%, -50%); z-index: 2; display: flex; align-items: center; gap: 11px; padding: 10px 15px 10px 10px; border-radius: 15px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.058), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.09);
+  box-shadow: 0 16px 36px -16px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.08); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  transition: transform 220ms var(--ease-out), border-color 220ms var(--ease-out), box-shadow 220ms var(--ease-out); }
+.gnode:hover { border-color: rgba(255,255,255,0.18); }
+.gic { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); color: var(--t-72); }
+.gic svg { width: 16px; height: 16px; }
+.gmeta { display: flex; flex-direction: column; gap: 2px; line-height: 1.05; }
+.gname { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+.gcount { font-family: var(--mono); font-size: 11px; color: var(--t-40); font-variant-numeric: tabular-nums; }
+
+/* Bastion classification wall — solid vertical membrane; --wall-rgb set per pass-through */
+.wall { position: absolute; transform: translate(-50%, -50%); z-index: 3; height: 82%; width: 160px; display: grid; place-items: center; --wall-rgb: 255,255,255; }
+.wall-beam { position: absolute; left: 50%; top: 0; bottom: 0; width: 3px; transform: translateX(-50%); border-radius: 3px; background: rgb(var(--wall-rgb));
+  box-shadow: 0 0 20px 2px rgba(var(--wall-rgb), 0.4), 0 0 66px 12px rgba(var(--wall-rgb), 0.15);
+  -webkit-mask: linear-gradient(180deg, transparent, #000 7%, #000 93%, transparent); mask: linear-gradient(180deg, transparent, #000 7%, #000 93%, transparent);
+  transition: background 320ms ease, box-shadow 320ms ease; }
+.wall-beam::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 44px; transform: translateX(-50%); background: linear-gradient(90deg, transparent, rgba(var(--wall-rgb), 0.08), transparent);
+  -webkit-mask: linear-gradient(180deg, transparent, #000 10%, #000 90%, transparent); mask: linear-gradient(180deg, transparent, #000 10%, #000 90%, transparent); transition: background 320ms ease; }
+.wall-core { position: relative; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 12px 16px 12px 12px; border-radius: 16px; background: var(--bg-2); border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 22px 54px -18px rgba(0,0,0,0.95), inset 0 1px 0 rgba(255,255,255,0.06); }
+.wall-core .gic { width: 38px; height: 38px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--t-72); display: grid; place-items: center; }
+/* Shield breathes orange while the defense is adjudicating (classifier/investigator busy).
+   Color + glow only (no movement) so it reads as a status signal under reduced-motion too. */
+.wall.is-processing .wall-core .gic { animation: shield-think 1.3s ease-in-out infinite; }
+@keyframes shield-think {
+  0%, 100% { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); box-shadow: none; color: var(--t-72); }
+  50% { background: rgba(250,93,25,0.20); border-color: rgba(250,93,25,0.45); box-shadow: 0 0 18px rgba(250,93,25,0.4); color: var(--heat-hi); }
+}
+.wall-core .gic svg { width: 20px; height: 20px; }
+.wall-core .gname { font-size: 14px; }
+/* Node caption — one shared language for every station (defense / safe / diverted). */
+.ntag { position: absolute; top: -9px; left: 16px; font-size: 8px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--t-40); background: var(--bg-2); padding: 1px 6px; border: 1px solid var(--line-2); border-radius: 5px; white-space: nowrap; }
+
+.gnode.src { padding: 0; width: 46px; height: 46px; border-radius: 50%; justify-content: center; background: radial-gradient(circle at 50% 32%, rgba(255,255,255,0.08), rgba(255,255,255,0.02)); }
+.gnode.src .gic { width: 42px; height: 42px; border: 0; background: transparent; color: var(--t-56); }
+.gnode.src .gic svg { width: 18px; height: 18px; }
+
+/* node positions (percent of stage): graph centered, wall on the midline,
+   source and outcomes symmetric around it */
+.n-src { left: 84%; top: 50%; }
+.n-bastion { left: 50%; top: 50%; }
+/* +41px = (128px card - 46px source circle) / 2: puts the cards' LEFT edge exactly
+   as far from the stage edge as the source circle's RIGHT edge is from its side. */
+.n-server { left: calc(16% + 41px); top: 78%; }
+.n-honeypot { left: calc(16% + 41px); top: 22%; }
+/* identical card width for the two outcome nodes (content stays left-aligned) */
+.n-server, .n-honeypot { width: 128px; }
+
+/* footer: active defenses + latest incident */
+.ov-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; }
+.defenses { display: flex; gap: 10px; }
+.def-chip { display: flex; align-items: baseline; gap: 7px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--glass); }
+.def-n { font-family: var(--mono); font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+.def-l { font-size: 9px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--t-32); }
+.latest { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; height: 42px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--glass); color: inherit; font: inherit; cursor: pointer; text-align: left; transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out); }
+.latest:hover:not(:disabled) { background: var(--t-4); border-color: var(--line-2); }
+.latest:disabled { cursor: default; }
+.latest .sev { width: 7px; height: 7px; border-radius: 50%; background: var(--t-32); flex: 0 0 auto; }
+.latest .sev[data-sev="high"], .latest .sev[data-sev="critical"] { background: var(--heat); box-shadow: 0 0 7px rgba(250,93,25,0.55); }
+.latest .sev[data-sev="medium"] { background: var(--t-56); }
+.latest-label { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--t-32); }
+.latest-type { font-size: 12.5px; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.latest-none { font-size: 12px; color: var(--t-32); }
+.latest-time { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-32); flex: 0 0 auto; }
+
+@media (max-width: 1000px) { .ov-kpis { grid-template-columns: repeat(4, 1fr); } .ov-kpis .kpi:nth-child(n+5) { border-top: 1px solid var(--line); } .defenses { display: none; } }

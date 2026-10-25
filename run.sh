@@ -31,12 +31,12 @@ cat <<EOF
     Token:   send MANAGEMENT_TOKEN as Basic Auth or a Bearer Authorization header
   App:       http://localhost:8080/
   Email:     Resend (configure RESEND_API_KEY, ALERT_FROM, ALERT_TO)
-  Test mail: docker compose run --rm --no-deps mail-worker python mail_worker.py --test
+  Test mail: docker compose run --rm --no-deps mail-worker python -m bastion.mail_worker --test
 
   Mode: $(grep -E '^BASTION_MODE=' .env | cut -d= -f2 || echo observe)
   Logs: docker compose logs -f proxy blue
   Stop: docker compose down
 
   To initialize the DVWA database (first run or explicit reset):
-    docker compose exec proxy python bootstrap_dvwa.py \$DVWA_URL --reset-confirm RESET-DVWA
+    docker compose exec proxy python ops/bootstrap_dvwa.py \$DVWA_URL --reset-confirm RESET-DVWA
 EOF

@@ -14,7 +14,7 @@ The repo ships a complete local lab: the proxy, the investigator, a privileged a
 - **Contain, patch, eradicate, alert.** Bastion can divert or ban a source, install a route-scoped virtual patch from a vetted pattern set, raise the app's security level, kill sessions or processes, cut egress, quarantine the container and rotate credentials. On a confirmed exploit it is instructed to both contain the source and patch the route, and a backstop diverts any malicious source still uncontained once a patch lands.
 - **Receipts for every action.** Each tool call is schema-validated, recorded with its case id, tier (reflex, Bastion or operator) and reason, and executed at most once.
 - **Durable by default.** Requests, triage, actions, incidents, the email outbox and container logs live in SQLite (WAL). Work survives restarts.
-- **Operator API.** Authenticated endpoints under `/__api/v1` serve the detection funnel, requests, incidents, defenses and container logs as JSON and SSE, plus controls to launch a red-team run, stop it and reset the lab. The web frontend is being rebuilt on this branch.
+- **Operator API.** Authenticated endpoints under `/__api/v1` serve the detection funnel, requests, incidents, defenses and container logs as JSON and SSE, plus controls to launch a red-team run, stop it and reset the lab. A built-in dashboard at `/__dash` renders the live request lifecycle, incidents, investigator trace and attacker console from the same feed.
 - **A target models cannot memorize.** The vulnerable app is a de-fingerprinted fork of DVWA's modules, re-seeded on every boot, so the red agent has to probe and fail before it succeeds. That gives the blue side real signal to act on.
 
 ## Architecture
@@ -140,7 +140,8 @@ Then start it:
 bash run.sh                 # checks the tokens, then docker compose up --build -d
 ```
 
-- **API:** http://localhost:8080/__api/v1/overview, username `admin`, password `MANAGEMENT_TOKEN`
+- **Dashboard:** http://localhost:8080/__dash, username `admin`, password `MANAGEMENT_TOKEN`
+- **API:** http://localhost:8080/__api/v1/overview, same credentials
 - **Target app:** http://localhost:8080/ (browse it and your clicks show up as live requests)
 
 The target initializes its own database at boot; there is no setup step. Keep `.env` private. [`.env.example`](.env.example) documents the remaining settings: classifier threshold and timeout, request limits, source attribution, retention and the target seed.
@@ -149,7 +150,7 @@ The target initializes its own database at boot; there is no setup step. Keep `.
 
 `POST /__api/v1/control/run` with `{"job": "attack-sqli"}` (or `attack-cmdi`, `attack-lfi`, `attack-xss`) launches the red agent with that objective, `/__api/v1/control/stop` ends the run, and `/__api/v1/control/reset` puts the lab back to a clean, exploitable state. Runs call your LLM provider, so keep them short.
 
-Reset restores the target (unpause, reconnect egress, security level back to `medium`) and clears requests, incidents, logs, bans, diversions and virtual patches. To clear only the defenses and keep the history, run `python reset_demo.py` from the host.
+Reset restores the target (unpause, reconnect egress, security level back to `medium`) and clears requests, incidents, logs, bans, diversions and virtual patches. To clear only the defenses and keep the history, run `python ops/reset_demo.py` from the host.
 
 ```sh
 docker compose logs -f proxy blue mail-worker   # follow the backend
@@ -171,11 +172,11 @@ Asynchronous modes cannot stop the first request from reaching the app; they sto
 
 ## Operator API
 
-The web frontend was removed on this branch to be rebuilt from scratch. The backend it used is intact:
+The dashboard at `/__dash` is a static, CSP-safe SPA served by the proxy itself (no build step, no external origins) and runs entirely on this API:
 
 - **Read:** `/__api/v1/overview` (funnel, outcomes, recent events, actions, incidents and active defenses), `/__api/v1/stream` (the same snapshot over SSE), paginated records such as `/__api/v1/requests`, `/__api/v1/incidents/<id>`, and container logs at `/__api/v1/logs/<source>` with cursors and an SSE stream.
 - **Control:** `/__api/v1/control/status`, `/run`, `/stop` and `/reset`.
-- **Auth:** HTTP Basic (`admin` and `MANAGEMENT_TOKEN`) or a Bearer token. Every `/__` route is sent with `Cache-Control: no-store` and a strict CSP (`default-src 'self'`, no inline script or style).
+- **Auth:** HTTP Basic (`admin` and `MANAGEMENT_TOKEN`) or a Bearer token. Every `/__` route is sent with `Cache-Control: no-store` and a strict CSP (`default-src 'self'`, no inline script or style). For local development, `DASHBOARD_NO_AUTH=1` in `.env` opens `/__dash` and `/__api` without credentials — never expose the port with it set.
 
 ## Response toolkit
 
@@ -194,10 +195,10 @@ Process termination needs Linux pidfd support in the target, and egress isolatio
 
 The target (`target_app/`) keeps the vulnerable code from DVWA's SQL injection, command injection, file viewer and reflected XSS modules, but every recognizable fingerprint is mutated per boot: page paths, parameter names, cookie and table names, response templates, credentials, and a SQLite backend in place of MySQL. Set `BASTION_SEED` to pin one instance. [MUTATION.md](MUTATION.md) has the full scheme.
 
-`red_agent.py` is a scoped LLM attacker with four objectives: `sqli` (dump the credential store), `cmdi` (remote command execution), `lfi` (read a file outside the viewer) and `xss` (reflected script injection). Launch it through the control API, with `docker compose --profile red-team up red`, or from the host:
+`bastion/red_agent.py` is a scoped LLM attacker with four objectives: `sqli` (dump the credential store), `cmdi` (remote command execution), `lfi` (read a file outside the viewer) and `xss` (reflected script injection). Launch it through the control API, with `docker compose --profile red-team up red`, or from the host:
 
 ```sh
-python red_agent.py sqli    # or cmdi, lfi, xss
+python -m bastion.red_agent sqli    # or cmdi, lfi, xss
 ```
 
 ## Email alerts
@@ -205,12 +206,23 @@ python red_agent.py sqli    # or cmdi, lfi, xss
 Alerts go out through Resend's HTTPS API. The `mail-worker` service drains the durable outbox independently of investigations, retries transient failures (up to five attempts, stable idempotency key) and records provider acceptance ids. Send one labeled test email without generating traffic:
 
 ```sh
-docker compose run --rm --no-deps mail-worker python mail_worker.py --test
+docker compose run --rm --no-deps mail-worker python -m bastion.mail_worker --test
 ```
 
 `accepted` means Resend accepted the message; delivery and bounce status live in Resend's email log.
 
 ## Development
+
+```
+bastion/     runtime package: proxy, blue/red agents, honeypot, actuator, mail worker, dashboard
+frontend/    operator dashboard SPA (static, CSP-safe, no build step)
+target_app/  deliberately vulnerable target image
+evals/       host-run scoring harness (eval_waf, eval_live, score_campaign, benign_agent)
+ops/         operator scripts (bootstrap_dvwa, reset_demo)
+tests/       pytest suite
+```
+
+Every service runs as `python -m bastion.<module>`; the compose file is the reference.
 
 ```sh
 uv venv --python 3.12
@@ -221,23 +233,23 @@ uv pip install -r requirements.txt pytest
 Opt-in Docker tests start isolated fixture containers:
 
 ```sh
-RUN_DOCKER_TESTS=1 .venv/bin/python -m pytest -q test_docker_logs.py
-RUN_DOCKER_APP_TESTS=1 .venv/bin/python -m pytest -q test_docker_dashboard.py
+RUN_DOCKER_TESTS=1 .venv/bin/python -m pytest -q tests/test_docker_logs.py
+RUN_DOCKER_APP_TESTS=1 .venv/bin/python -m pytest -q tests/test_docker_dashboard.py
 ```
 
 The default suites use mock transports and cover proxy enforcement, classifier failures, tool dispatch and idempotency, triage concurrency, queues, reset behavior, redaction, auth, notification retries, log replay and the operator API. They do not measure model judgment.
 
-`eval_waf.py` scores Jev on the labeled dataset in `eval_dataset.jsonl` and reports precision and recall with Wilson intervals (live runs use API credit):
+`evals/eval_waf.py` scores Jev on the labeled dataset in `evals/eval_dataset.jsonl` and reports precision and recall with Wilson intervals (live runs use API credit):
 
 ```sh
-TYPESAFE_API_KEY=your-key .venv/bin/python eval_waf.py --repeat 3
+TYPESAFE_API_KEY=your-key .venv/bin/python -m evals.eval_waf --repeat 3
 ```
 
-`benign_agent.py` simulates ordinary staff. Because the target re-randomizes on every boot, it learns the running instance by browsing it: it reads the operator handbook, signs in, follows the links to the four tools and uses them with normal input (a record number, a loopback host, a published document, a staff name). `eval_live.py` runs that traffic before, during and after an attack and reports Jev's per-phase confusion matrix:
+`benign_agent.py` simulates ordinary staff. Because the target re-randomizes on every boot, it learns the running instance by browsing it: it reads the operator handbook, signs in, follows the links to the four tools and uses them with normal input (a record number, a loopback host, a published document, a staff name). `evals/eval_live.py` runs that traffic before, during and after an attack and reports Jev's per-phase confusion matrix:
 
 ```sh
-python benign_agent.py --duration 60
-.venv/bin/python eval_live.py --before 20 --during 40 --after 20
+python -m evals.benign_agent --duration 60
+.venv/bin/python -m evals.eval_live --before 20 --during 40 --after 20
 ```
 
 ## Limits

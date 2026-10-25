@@ -1,0 +1,53 @@
+/* Incidents page — master–detail layout. All rules scoped under .p-incidents.
+   Reuses global .panel/.row/.sev/.kv/.sec/.prose/.evidence/.mini/.status-pill;
+   orange stays reserved for high/critical severity + rejected actions. */
+
+.p-incidents { height: 100%; min-height: 0; }
+.p-incidents .inc { height: 100%; min-height: 0; display: grid; grid-template-columns: 372px minmax(0, 1fr); gap: 14px; }
+.p-incidents .inc-list, .p-incidents .inc-det { min-width: 0; }
+
+/* list toolbar: search + severity chips */
+.p-incidents .inc-tools { flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.p-incidents .inc-search { height: 30px; padding: 0 11px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--t-4); color: var(--text); font: inherit; font-size: 12px; outline: none; transition: border-color 160ms var(--ease-out), background 160ms var(--ease-out); }
+.p-incidents .inc-search::placeholder { color: var(--t-32); }
+.p-incidents .inc-search:focus { border-color: var(--t-24); background: var(--t-6); }
+.p-incidents .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.p-incidents .chip { height: 24px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t-40); font: inherit; font-size: 10.5px; letter-spacing: 0.03em; cursor: pointer; transition: background 160ms var(--ease-out), color 160ms var(--ease-out), border-color 160ms var(--ease-out), transform 120ms var(--ease-out); }
+.p-incidents .chip:hover { color: var(--t-72); background: var(--t-4); }
+.p-incidents .chip:active { transform: scale(0.96); }
+.p-incidents .chip:focus-visible { outline: 2px solid var(--t-40); outline-offset: 2px; }
+.p-incidents .chip.on { color: var(--t-88); border-color: var(--line-2); background: var(--t-8); }
+.p-incidents .chip.on[data-sev="critical"], .p-incidents .chip.on[data-sev="high"] { color: var(--heat-hi); border-color: var(--heat-24); background: var(--heat-10); }
+
+/* rows: smooth selection highlight (global .row supplies base + hover) */
+.p-incidents .row { transition: background 160ms var(--ease-out), box-shadow 200ms var(--ease-out); }
+.p-incidents .row.sel { background: var(--t-6); box-shadow: inset 2px 0 0 var(--t-40); }
+.p-incidents .row.sel .row-type { color: var(--text); }
+.p-incidents .row.sel .row-time { color: var(--t-56); }
+
+/* load-older footer button */
+.p-incidents .more { display: block; width: 100%; padding: 10px 14px; border: 0; background: transparent; color: var(--t-40); font: inherit; font-size: 11px; text-align: center; cursor: pointer; transition: background 140ms var(--ease-out), color 140ms var(--ease-out); }
+.p-incidents .more:hover:not(:disabled) { background: var(--t-4); color: var(--t-72); }
+.p-incidents .more:focus-visible { outline: 2px solid var(--t-40); outline-offset: -2px; }
+.p-incidents .more:disabled { color: var(--t-24); cursor: default; }
+
+/* detail pane */
+.p-incidents .det-head { gap: 12px; }
+.p-incidents .det-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.p-incidents .det-title .sev { width: 8px; height: 8px; }
+.p-incidents .det-title h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-incidents .det-head .tag { flex: 0 0 auto; }
+.p-incidents .det-body { padding: 16px 18px; transition: opacity 160ms var(--ease-out); }
+.p-incidents .det-body.busy { opacity: 0.45; }
+.p-incidents .det-body .kv { margin-bottom: 4px; }
+.p-incidents .det-body .kv .v.hot { color: var(--heat-hi); }
+.p-incidents .det-body .evidence { max-height: 300px; }
+.p-incidents .det-body .status-pill { margin-top: 2px; }
+
+@media (max-width: 1100px) { .p-incidents .inc { grid-template-columns: 300px minmax(0, 1fr); } }
+@media (max-width: 760px) { .p-incidents .inc { grid-template-columns: 1fr; grid-template-rows: minmax(0, 45%) minmax(0, 1fr); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .p-incidents .chip, .p-incidents .more, .p-incidents .inc-search, .p-incidents .row { transition: none; }
+  .p-incidents .det-body { transition: opacity 1ms linear; }
+}

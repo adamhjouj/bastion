@@ -2,6 +2,7 @@
 data/
 .venv/
 __pycache__/
+.pytest_cache/
 .pull.log
 node_modules/
 playwright-report/

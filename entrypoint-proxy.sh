@@ -26,4 +26,4 @@ PY
 # node_modules/*) are passed to uvicorn literally instead of being expanded by
 # the shell against the mounted /app tree.
 set -f
-exec uvicorn proxy:app --host 0.0.0.0 --port 8080 --no-proxy-headers --log-level info ${UVICORN_EXTRA_ARGS:-}
+exec uvicorn bastion.proxy:app --host 0.0.0.0 --port 8080 --no-proxy-headers --log-level info ${UVICORN_EXTRA_ARGS:-}

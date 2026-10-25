@@ -38,7 +38,7 @@ services:
 
   honeypot:
     <<: *app
-    command: ["python", "honeypot_app.py"]
+    command: ["python", "-m", "bastion.honeypot_app"]
     environment:
       HONEYPOT_PORT: "9000"
       BASTION_DATA_DIR: /app/data
@@ -85,7 +85,7 @@ services:
     image: bastion-actuator
     init: true
     logging: *runtime-logging
-    command: ["python", "-m", "uvicorn", "actuator_app:app", "--host", "0.0.0.0", "--port", "9010"]
+    command: ["python", "-m", "uvicorn", "bastion.actuator_app:app", "--host", "0.0.0.0", "--port", "9010"]
     environment:
       BASTION_PROJECT: bastion
       BASTION_TARGETS: dvwa
@@ -105,7 +105,7 @@ services:
   # Independent email delivery: slow investigations cannot stall the outbox.
   mail-worker:
     <<: *app
-    command: ["python", "-u", "mail_worker.py"]
+    command: ["python", "-u", "-m", "bastion.mail_worker"]
     env_file: .env
     environment:
       BASTION_DATA_DIR: /app/data
@@ -114,7 +114,7 @@ services:
 
   blue:
     <<: *app
-    command: ["python", "-u", "blue_agent.py"]
+    command: ["python", "-u", "-m", "bastion.blue_agent"]
     env_file: .env
     environment:
       DVWA_URL: http://dvwa:80
@@ -133,7 +133,7 @@ services:
   red:
     <<: *app
     profiles: ["red-team"]
-    command: ["python", "-u", "red_agent.py", "sqli"]
+    command: ["python", "-u", "-m", "bastion.red_agent", "sqli"]
     env_file: .env
     environment:
       PROXY_URL: http://proxy:8080
