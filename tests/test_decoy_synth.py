@@ -8,7 +8,7 @@ from bastion import store
 from bastion.decoy import record
 from bastion.decoy.session import Sessions
 from bastion.decoy.shape import ShapeStore
-from bastion.decoy.static import PAGE
+from bastion.decoy.static import fallback_page
 from bastion.decoy.synth import Decoy, DecoyRequest, LLMBudget, build_prompt, parse_llm_output
 
 HDRS = [("server", "Apache"), ("x-powered-by", "PHP/8.2.35"), ("set-cookie", "APPSESS398=ef19; path=/"),
@@ -85,8 +85,14 @@ def test_unknown_route_uses_learned_error_page_without_llm_and_static_without_sh
     assert put.status == 404 and put.source == "error_template"
     empty = Decoy(lambda: ShapeStore(), Sessions(salt="t"), llm_enabled=False)
     s = _run(empty.respond(_req("GET", "/admin")))
-    assert s.status == 200 and s.source == "static" and s.body.decode() == PAGE
-    assert "honeypot" not in s.body.decode().lower()
+    body = s.body.decode()
+    # Cold start (nothing learned, no LLM): a brand-less, plausible holding page — never the old
+    # hard-coded 'Acme' identity, never a decoy tell.
+    assert s.status == 200 and s.source == "static" and body == fallback_page(ShapeStore())
+    assert "Acme" not in body and "honeypot" not in body.lower()
+    assert "Sign in" in body
+    # When an identity has been learned, the same fallback carries it (consistent, not contradictory).
+    assert "Helios" in fallback_page(learned_shape())
 
 
 def test_llm_synthesis_is_constrained_cached_and_reused_as_template():

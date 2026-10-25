@@ -179,3 +179,27 @@ Cannot yet:
 - Timing on the first hit of an unknown route when the LLM is used (1.5–2.5 s observed); later
   sessions get the synthesised template instantly. `HONEYPOT_DELAY` masks this if set.
 - Synthesised templates live in memory; a restart re-synthesises on first hit.
+
+
+---
+## Decoy verification (2026-10-25, live, LLM path limited by workspace quota)
+
+Reverse-engineering works on the learned path — the decoy is byte-for-byte consistent with the
+real app it fronts:
+- Fingerprint mirrored: Server: Apache, X-Powered-By: PHP/8.2.35, cookie name APPSESS398.
+- Identity mirrored: every page carries the real app's title suffix ("Helios Intranet"),
+  learned per boot — never a hard-coded brand.
+- Learned routes match real responses: /console/netcheck -> "Sign in", /console/logout ->
+  "Operator handbook" (identical title + status to the real app).
+- Unknown/unlearned paths return the learned, consistent 404 ("Not found – Helios Intranet").
+
+Old hard-coded "Acme Internal Portal" fallback REMOVED (bastion/decoy/static.py). Replaced with
+fallback_page(shape): uses the learned title when known, else a brand-less "Sign in" holding page.
+Verified live: warm path has no Acme; cold start (empty learner + no LLM) is brand-less, no tells.
+
+Known coverage gap (improvement, not a tell): routes the learner has not yet observed return a
+consistent 404 instead of the real app's 200. Closing it fully needs the LLM-synthesis path (for
+unknown routes under a known prefix) and/or authenticated crawl coverage — the LLM path is
+currently rate-limited by the Anthropic/DeepSeek workspace quota (regains 2026-11-01), so synthesis
+of never-seen routes could not be exercised this session. The learned-template path (the core of
+the reverse-engineering) is fully working.

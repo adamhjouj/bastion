@@ -1,5 +1,5 @@
 """Response synthesis for one decoy hit: session cache → learned template + fake data →
-time-boxed LLM synthesis → learned error page → static page. docs/DECOY.md §2.
+time-boxed LLM synthesis → learned error page → identity-consistent fallback. docs/DECOY.md §2.
 Nothing here ever contacts the real application."""
 import asyncio
 import hashlib
@@ -15,7 +15,7 @@ from bastion import llm
 from bastion.decoy import skeleton
 from bastion.decoy.fake import Faker
 from bastion.decoy.shape import ShapeStore, route_pattern
-from bastion.decoy.static import GIF_1X1, PAGE
+from bastion.decoy.static import GIF_1X1, fallback_page
 from bastion.privacy import form_view, request_view
 
 LLM_TIMEOUT = float(os.getenv("DECOY_LLM_TIMEOUT", "8"))
@@ -125,7 +125,9 @@ class Decoy:
         if resp is None:
             resp = self._error(req, session, shape, params)
         if resp is None:
-            resp = DecoyResponse(200, PAGE.encode(), [("content-type", "text/html; charset=utf-8")], "static")
+            # Last resort (cold start: nothing learned, no LLM). Build it from the learned
+            # identity when one exists so it never contradicts the app being mimicked.
+            resp = DecoyResponse(200, fallback_page(shape).encode(), [("content-type", "text/html; charset=utf-8")], "static")
             self.stats["static"] += 1
         self._finish_headers(resp, shape, session)
         if req.method == "HEAD":

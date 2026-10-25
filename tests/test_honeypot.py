@@ -28,7 +28,8 @@ def test_honeypot_app_logs_request(tmp_path, monkeypatch):
             r = await client.get("/admin", headers={"X-Forwarded-For": "10.0.0.1",
                                                     "User-Agent": "curl/8.0"})
             assert r.status_code == 200
-            assert "Acme" in r.text
+            # Cold start serves a brand-less holding page — never the old hard-coded 'Acme' fake.
+            assert "Acme" not in r.text
             assert "honeypot" not in r.text.lower()
     asyncio.run(scenario())
     hits = store.read_jsonl(store.DATA / "honeypot_hits.jsonl")

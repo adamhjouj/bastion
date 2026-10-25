@@ -4,7 +4,7 @@ logged to the honeypot_hits stream so we bank their TTPs (paths, payloads, tooli
 
 The responses come from bastion.decoy (docs/DECOY.md): a shape model of the real app learned
 passively from proxy traffic and, optionally, an active GET-only crawl; per-session cache →
-learned template + fake data → time-boxed LLM synthesis → learned error page → the static PAGE.
+learned template + fake data → time-boxed LLM synthesis → learned error page → identity-consistent fallback.
 Nothing in this process ever forwards a request to the real app.
 """
 import asyncio
@@ -23,7 +23,6 @@ from bastion.decoy import record
 from bastion.decoy.learn import crawl_forever
 from bastion.decoy.session import Sessions
 from bastion.decoy.shape import ShapeFiles
-from bastion.decoy.static import PAGE  # noqa: F401  (kept: the static fallback, imported by tests)
 from bastion.decoy.synth import Decoy, DecoyRequest
 
 METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
