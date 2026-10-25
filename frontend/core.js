@@ -106,8 +106,12 @@ export async function openIncident(id) {
   clear(drawerBody);
   const meta = el("div", "kv");
   meta.appendChild(kv("Severity", inc.severity)); meta.appendChild(kv("Source", inc.source_ip, true));
-  meta.appendChild(kv("Filed", hhmmss(inc.ts), true)); meta.appendChild(kv("Case", inc.case_id, true));
+  meta.appendChild(kv("Filed", hhmmss(inc.ts), true)); meta.appendChild(kv("Case", inc.id != null ? "#" + inc.id : "", true));
   drawerBody.appendChild(meta);
+  /* the drawer is a quick peek; the full story (trace, rollback) lives on the Incidents page */
+  const open = el("button", "btn", "Open case file"); open.type = "button"; open.dataset.openCase = String(id);
+  open.addEventListener("click", () => { closeDrawer(); location.hash = "#/incidents/" + id; });
+  drawerBody.appendChild(open);
   if (inc.summary) { const s = section("Summary"); s.appendChild(el("p", "prose", inc.summary)); drawerBody.appendChild(s); }
   if (inc.evidence) { const s = section("Evidence"); s.appendChild(el("pre", "evidence", inc.evidence)); drawerBody.appendChild(s); }
   const reqs = data.requests || [];

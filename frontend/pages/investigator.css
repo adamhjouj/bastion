@@ -1,64 +1,97 @@
-/* Investigator page — blue defender's mind. All rules scoped under .p-investigator. */
+/* Investigator page — agent feed · audit ledger · active defenses · raw log. Scoped under .p-investigator.
+   Grid at 1440: content 1224 = feed column (1.45fr ≈ 715) + 14 gap + right column (1fr ≈ 495). */
 .p-investigator { height: 100%; min-height: 0; }
-.p-investigator .inv { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
-.p-investigator .head-l { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.p-investigator .inv { height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 14px; }
+.p-investigator .inv-left, .p-investigator .inv-right { display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
+/* basis 0 so the scrolling lists take what is left after content-sized blocks (log bar, defenses) */
+.p-investigator .inv-feed { flex: 1 1 0; }
+.p-investigator .inv-ledger { flex: 1 1 0; }
+.p-investigator .inv-def { flex: 0 0 auto; max-height: 46%; }
 
-/* ---- triage funnel ---- */
-.p-investigator .inv-funnel { flex: 0 0 auto; }
-.p-investigator .funnel { display: grid; grid-template-columns: 1fr 44px 1fr 44px 1fr 44px 1fr; align-items: stretch; padding: 13px 16px 15px; }
-.p-investigator .f-stage { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-.p-investigator .f-label { font-size: 12px; font-weight: 500; color: var(--t-40); }
-.p-investigator .f-val { font-family: var(--mono); font-size: 20px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
-.p-investigator .f-bar { display: block; height: 5px; border-radius: 3px; background: var(--t-6); overflow: hidden; }
-.p-investigator .f-fill { display: block; height: 100%; width: 0%; border-radius: inherit; background: var(--t-40); transition: width 420ms var(--ease-out); }
-.p-investigator .f-stage[data-stage="flagged"] .f-fill { background: rgba(250, 93, 25, 0.55); }
-.p-investigator .f-stage[data-stage="escalated"] .f-fill { background: var(--heat); }
-.p-investigator .f-stage[data-stage="actions"] .f-fill { background: var(--heat); }
-.p-investigator .f-sep { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
-.p-investigator .f-sep::before { content: "→"; font-size: 11px; line-height: 1; color: var(--t-16); }
-.p-investigator .f-pct { font-family: var(--mono); font-size: 11px; color: var(--t-40); font-variant-numeric: tabular-nums; }
-
-/* ---- main grid: reasoning + log | defenses ---- */
-.p-investigator .inv-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; }
-.p-investigator .inv-left { display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
-.p-investigator .inv-mind { flex: 1.6 1 0; }
-.p-investigator .inv-log { flex: 1 1 0; }
-.p-investigator .inv-right { display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
-.p-investigator .inv-right .panel { flex: 1 1 0; }
-
-/* reasoning line accents */
-.p-investigator .jev-score { margin-left: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--t-40); font-variant-numeric: tabular-nums; }
+/* ---- agent feed lines ---- */
+.p-investigator .inv-feed .line { align-items: flex-start; }
+.p-investigator .inv-feed .line.act .text { color: var(--text); font-weight: 500; }
+.p-investigator .inv-feed .line.act .label { color: var(--t-56); }
+.p-investigator .inv-feed .line.act .label.act { color: var(--heat-hi); }
+.p-investigator .inv-feed .line.quiet { padding-top: 4px; padding-bottom: 4px; }
+.p-investigator .inv-feed .line.quiet .text { color: var(--t-40); font-size: 12px; }
+.p-investigator .jev-score { margin-left: 8px; font-family: var(--mono); font-size: 11px; color: var(--t-40); font-variant-numeric: tabular-nums; }
 .p-investigator .jev-score.hot { color: var(--heat-hi); }
-.p-investigator .inv-mind .line .meta { margin-top: 1px; }
+.p-investigator .inv-feed .line .meta { margin-top: 1px; }
+.p-investigator .inv-feed .case { flex: 0 0 auto; align-self: flex-start; margin-left: auto; padding-top: 1px; font-family: var(--mono); font-size: 11px; color: var(--t-56); text-decoration: none; white-space: nowrap; border-radius: 4px; }
+.p-investigator .inv-feed .case:hover { color: var(--text); text-decoration: underline; }
+.p-investigator .inv-feed .case:focus-visible { outline: 2px solid var(--control); outline-offset: 2px; }
+.p-investigator .inv-feed .line.quiet .case { color: var(--t-40); }
 
-/* blue agent log */
+/* ---- raw agent log (collapsed disclosure) ---- */
+.p-investigator .inv-log { flex: 0 0 auto; display: flex; flex-direction: column; }
+.p-investigator .inv-log[open] { flex: 0 0 36%; min-height: 0; }
+.p-investigator .inv-log-head { cursor: pointer; list-style: none; user-select: none; }
+.p-investigator .inv-log-head::-webkit-details-marker { display: none; }
+.p-investigator .inv-log-head:hover { background: var(--raised); }
+.p-investigator .inv-log-head:focus-visible { outline: 2px solid var(--control); outline-offset: -2px; }
+.p-investigator .inv-log:not([open]) .inv-log-head { border-bottom: 0; }
+.p-investigator .inv-log-title { display: flex; align-items: center; gap: 9px; }
+.p-investigator .inv-log-title h2 { color: var(--t-72); font-weight: 500; }
+.p-investigator .chev { width: 6px; height: 6px; border-right: 1.5px solid var(--t-40); border-bottom: 1.5px solid var(--t-40); transform: rotate(-45deg); transition: transform 140ms var(--ease-out); }
+.p-investigator .inv-log[open] .chev { transform: rotate(45deg); }
 .p-investigator .inv-log .line { padding: 5px 14px; }
 .p-investigator .inv-log .line .text { font-family: var(--mono); font-size: 11px; color: var(--t-56); }
 .p-investigator .inv-log .line.sys .text { color: var(--t-40); font-style: normal; }
 
-/* ---- active defenses rows ---- */
-.p-investigator .d-row { padding: 9px 14px; border-bottom: 1px solid var(--t-4); }
-.p-investigator .d-top { display: flex; align-items: baseline; gap: 10px; }
-.p-investigator .d-key { font-family: var(--mono); font-size: 11.5px; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.p-investigator .d-aside { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-40); flex: 0 0 auto; }
-.p-investigator .d-sub { margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--t-40); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
-.p-investigator .d-sub.mono { font-family: var(--mono); font-size: 10px; }
+/* ---- audit ledger ---- */
+.p-investigator .lg-tools { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.p-investigator .lg-chip { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--t-56); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.p-investigator .lg-chip .d { width: 7px; height: 7px; border-radius: 50%; background: var(--t-24); flex: 0 0 auto; transition: background 160ms var(--ease-out); }
+.p-investigator .lg-chip[data-state="ok"] .d { background: var(--pos); }
+.p-investigator .lg-chip[data-state="broken"] { color: var(--neg); }
+.p-investigator .lg-chip[data-state="broken"] .d { background: var(--neg); }
+.p-investigator .lg-chip[data-state="none"] { color: var(--t-40); }
+.p-investigator .lg-chip[data-state="none"] .d { display: none; }
+.p-investigator .lg-verify { height: 24px; padding: 0 10px; font-size: 12px; }
+.p-investigator .lg-row { display: flex; align-items: baseline; gap: 10px; padding: 7px 14px; border-bottom: 1px solid var(--t-4); font-size: 12.5px; line-height: 1.5; }
+.p-investigator .lg-row time { font-family: var(--mono); font-size: 11px; color: var(--t-32); flex: 0 0 52px; font-variant-numeric: tabular-nums; }
+.p-investigator .lg-id { font-family: var(--mono); font-size: 11px; color: var(--t-40); flex: 0 0 48px; font-variant-numeric: tabular-nums; }
+.p-investigator .lg-tool { flex: 1 1 auto; min-width: 0; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-investigator .lg-out { font-family: var(--mono); font-size: 11px; color: var(--t-40); flex: 0 0 auto; white-space: nowrap; }
+.p-investigator .lg-out.bad { color: var(--heat-hi); }
+.p-investigator .lg-hash { font-family: var(--mono); font-size: 11.5px; color: var(--t-72); flex: 0 0 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.p-investigator .lg-hash.none { color: var(--t-32); }
+.p-investigator .lg-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 14px; border: 0; border-top: 1px solid var(--line); background: var(--sunk); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.p-investigator .lg-foot:hover { background: var(--raised); }
+.p-investigator .lg-foot:focus-visible { outline: 2px solid var(--control); outline-offset: -2px; }
+.p-investigator .lg-foot[hidden] { display: none; }
+.p-investigator .lg-head { font-size: 12px; color: var(--t-88); }
+.p-investigator .lg-copy { margin-left: auto; font-size: 11.5px; color: var(--t-40); }
 
-/* ---- component health strip ---- */
-.p-investigator .inv-health { flex: 0 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
-.p-investigator .hs { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-.p-investigator .hs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--t-16); flex: 0 0 auto; transition: background 200ms var(--ease-out); }
-.p-investigator .hs.on .hs-dot { background: var(--pos); }
-.p-investigator .hs-name { font-size: 11.5px; font-weight: 500; color: var(--t-72); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.p-investigator .hs.stale .hs-name { color: var(--t-32); }
-.p-investigator .hs-age { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-40); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+/* ---- active defenses: one panel, three hairline-separated sections ---- */
+.p-investigator .def-sec { border-bottom: 1px solid var(--line); }
+.p-investigator .def-sec:last-child { border-bottom: 0; }
+.p-investigator .def-head { display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 14px; font-size: 12px; font-weight: 500; color: var(--t-56); background: var(--sunk); }
+.p-investigator .def-empty { padding: 7px 14px 10px; color: var(--t-32); font-size: 12px; }
+.p-investigator .d-row { padding: 8px 14px; border-top: 1px solid var(--t-4); }
+.p-investigator .d-top { display: flex; align-items: baseline; gap: 10px; }
+.p-investigator .d-key { font-family: var(--mono); font-size: 12px; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-investigator .d-aside { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t-40); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.p-investigator .d-sub { margin-top: 3px; font-size: 11.5px; line-height: 1.5; color: var(--t-40); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.p-investigator .d-sub.mono { font-family: var(--mono); font-size: 11px; }
 
 /* ---- responsive + reduced motion ---- */
 @media (max-width: 1100px) {
-  .p-investigator .inv-main { grid-template-columns: 1fr; }
-  .p-investigator .inv-health { grid-template-columns: repeat(2, 1fr); }
+  .p-investigator { overflow-y: auto; }
+  .p-investigator .inv { height: auto; display: flex; flex-direction: column; }
+  .p-investigator .inv-left, .p-investigator .inv-right { flex: 0 0 auto; }
+  .p-investigator .inv-feed { flex: 0 0 auto; height: 58vh; }
+  .p-investigator .inv-log[open] { flex: 0 0 auto; height: 40vh; }
+  .p-investigator .inv-ledger { flex: 0 0 auto; height: 50vh; }
+  .p-investigator .inv-def { max-height: none; }
+}
+@media (max-width: 640px) {
+  .p-investigator .inv-feed .line { flex-wrap: wrap; }
+  .p-investigator .inv-feed .case { flex-basis: 100%; margin-left: 64px; }
+  .p-investigator .lg-id { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .p-investigator .f-fill, .p-investigator .hs-dot { transition: none; }
-  .p-investigator .line.enter, .p-investigator .row.enter { animation: none; }
+  .p-investigator .chev, .p-investigator .lg-chip .d { transition: none; }
+  .p-investigator .line.enter { animation: none; }
 }

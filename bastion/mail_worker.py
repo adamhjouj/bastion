@@ -15,7 +15,41 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from bastion.notifications import MailError, prepare_message, send_email, validate_config
+from bastion.notifications import MailError, prepare_message, report_context, send_email, validate_config
+
+
+def enrich_outbox_item(item):
+    """Turn the raise-time alert into the full review report, once, on the first delivery attempt.
+
+    The action list, audit head and trend are only complete at send time, but the payload bound
+    to a provider idempotency key must never change between retries. So the enriched `_mail` is
+    persisted back onto the outbox row before the first send; retries (attempts > 1) and rows
+    already carrying an enriched message are left exactly as they are. Enrichment never fails
+    the send: on any error the raise-time message goes out instead.
+    """
+    from bastion import store
+    key = item.get("_mail_key")
+    if not key or (item.get("_mail") or {}).get("enriched"):
+        return item
+    try:
+        with store.connection() as db:
+            row = db.execute("SELECT attempts FROM outbox WHERE key=?", (key,)).fetchone()
+        if row is None or row["attempts"] > 1:
+            return item
+        enriched = {k: v for k, v in item.items() if k != "_mail_key"}
+        enriched["_mail"] = prepare_message(enriched, report_context(enriched))
+        with store.connection(write=True) as db:
+            db.execute("UPDATE outbox SET data=? WHERE key=?", (json.dumps(enriched), key))
+    except Exception:
+        # Includes a MailError from re-reading ALERT_FROM/ALERT_TO: the raise-time message
+        # captured the addresses that were valid when the alert was queued.
+        print("[mail-worker] report enrichment failed; sending the raise-time alert instead", flush=True)
+        return item
+    return {**enriched, "_mail_key": key}
+
+
+def deliver(item):
+    return send_email(enrich_outbox_item(item))
 
 
 def main(argv=None):
@@ -51,7 +85,7 @@ def main(argv=None):
             store.initialize()
             case_id = test_incident["case_id"]
             store.queue_mail(case_id, test_incident)
-            result = store.deliver_mail(send_email, key=case_id)
+            result = store.deliver_mail(deliver, key=case_id)
             print(json.dumps(result))
             if result and result["status"] == "accepted":
                 print("Accepted by the mail provider. Check your inbox/spam folder and the provider's email log; inbox delivery is not yet confirmed.")
@@ -66,7 +100,7 @@ def main(argv=None):
         while not stop.is_set():
             try:
                 store.set_health("mail-worker", {"ready": True})
-                result = store.deliver_mail(send_email)
+                result = store.deliver_mail(deliver)
                 if result:
                     print(json.dumps(result), flush=True)
             except Exception:

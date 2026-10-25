@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bastion. A first responder for your web app</title>
+<meta name="description" content="Bastion fronts your web app, judges every request with no training on your logs, contains an attack itself and writes each move to a hash-chained log you can undo.">
+<meta name="theme-color" content="#ecebe7">
+<link rel="icon" type="image/png" sizes="512x512" href="assets/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Albert+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+<script>document.documentElement.classList.add('js')</script>
+</head>
+<body>
+
+<header class="top wrap">
+  <a class="wordmark" href="#top" aria-label="Bastion, home"><span class="wordmark__mark" aria-hidden="true"></span>Bastion</a>
+  <nav aria-label="Sections">
+    <a href="#how">How it works</a>
+    <a href="#actions">Actions</a>
+    <a href="#undo">Undo</a>
+    <a href="#questions">Questions</a>
+  </nav>
+  <a class="button" href="#pilot">Request a pilot</a>
+</header>
+
+<main id="top">
+
+  <section class="hero" aria-labelledby="title">
+    <div class="hero__copy wrap">
+      <h1 id="title" class="display lines">
+        <span class="line"><span data-line style="--i:0">A first responder</span></span>
+        <span class="line"><span data-line style="--i:1">for your web app</span></span>
+      </h1>
+      <p class="lead" data-rise style="--i:2">Bastion fronts your web app, judges every request with no training on your logs, contains an attack itself and logs each move so you can undo it.</p>
+      <a class="button" href="#pilot" data-rise style="--i:3">Request a pilot</a>
+    </div>
+
+    <div class="stage">
+      <div class="stage__inner">
+        <div class="demo" data-ui id="demo">
+          <div class="demo__head"><span>Live request</span><span class="demo__live">agent · live</span></div>
+          <form class="demo__pick" id="demo-form" autocomplete="off">
+            <div class="demo__chips" role="group" aria-label="Sample requests">
+              <button type="button" data-req="/products?id=42"><code>/products?id=42</code></button>
+              <button type="button" data-req="/s?id=1' OR '1'='1" aria-pressed="true"><code>/s?id=1' OR '1'='1</code></button>
+              <button type="button" data-req="/lookup?q=&lt;script&gt;alert(1)&lt;/script&gt;"><code>/lookup?q=&lt;script&gt;alert(1)&lt;/script&gt;</code></button>
+              <button type="button" data-req="/files?p=../../../etc/passwd"><code>/files?p=../../../etc/passwd</code></button>
+              <button type="button" data-req="/ping?host=127.0.0.1;id"><code>/ping?host=127.0.0.1;id</code></button>
+            </div>
+            <div class="demo__line">
+              <label for="demo-path"><code>GET</code></label>
+              <input id="demo-path" class="mono" type="text" value="/s?id=1' OR '1'='1" spellcheck="false" aria-describedby="demo-help">
+              <button type="submit">Send</button>
+            </div>
+          </form>
+          <div class="demo__route" aria-hidden="true">
+            <svg viewBox="0 0 592 150" preserveAspectRatio="none">
+              <path id="leg-in" d="M 96 75 L 250 75"></path>
+              <path id="leg-server" d="M 342 75 C 400 75 430 30 504 30"></path>
+              <path id="leg-decoy" d="M 342 75 C 400 75 430 120 504 120"></path>
+            </svg>
+            <div class="node node--internet"><b>Internet</b><span>source</span></div>
+            <div class="node node--bastion"><b>Bastion</b><span id="node-bastion-state">screening</span></div>
+            <div class="node node--server"><b>Server</b><span>your app</span></div>
+            <div class="node node--decoy"><b>Decoy</b><span>honeypot</span></div>
+            <div class="demo__dot" id="demo-dot"></div>
+          </div>
+          <dl class="demo__verdict" id="demo-verdict" aria-live="polite">
+            <dt>verdict</dt><dd><samp class="heat" id="v-verdict">malicious 0.97 · sql_injection</samp></dd>
+            <dt>route</dt><dd><samp id="v-route">diverted → Decoy</samp></dd>
+            <dt>action</dt><dd><samp id="v-action">divert_to_honeypot · virtual_patch /s · undo: undivert, remove_vpatch</samp></dd>
+          </dl>
+          <ul class="demo__tape" id="demo-tape">
+            <li><span>now</span><code>GET /s?id=1' OR '1'='1</code><samp class="heat">diverted</samp></li>
+            <li><span>earlier</span><code>GET /</code><samp class="pos">200</samp></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <p class="hero__note" id="demo-help" data-rise style="--i:4">The verdict in this demonstration is computed in your browser from a few fixed patterns. Bastion itself asks a zero-shot model.</p>
+  </section>
+
+  <section id="how" class="section stages wrap" aria-labelledby="how-title">
+    <div class="stages__board">
+      <h2 id="how-title" class="head" data-reveal>One request, four stages</h2>
+      <div class="tile tile--1" data-reveal style="--i:1"><img src="assets/ui-live-tape.png" width="894" height="1388" alt="Bastion's live request list: paths with their timestamps and the word diverted beside each probe" loading="lazy" decoding="async"></div>
+      <div class="tile tile--2" data-reveal style="--i:2"><img src="assets/ui-verdicts.png" width="1396" height="800" alt="Bastion's reasoning panel: virtual patch entries quoting the classifier score and attack type for each confirmed exploit attempt" loading="lazy" decoding="async"></div>
+      <div class="tile tile--3" data-reveal style="--i:3"><img src="assets/ui-case-file.png" width="1592" height="1000" alt="An incident case file: the evidence, the triggering requests and the response timeline ending in divert to honeypot" loading="lazy" decoding="async"></div>
+      <div class="tile tile--4" data-reveal style="--i:4"><img src="assets/ui-agent-log.png" width="1396" height="480" alt="The agent log: each line names the tool, its outcome and the case it belongs to" loading="lazy" decoding="async"></div>
+    </div>
+    <div class="stages__text">
+      <div data-reveal style="--i:1"><h3>Screened</h3><p>Every request meets the proxy first. Bans, virtual patches and rate limits apply before anything else.</p></div>
+      <div data-reveal style="--i:2"><h3>Judged</h3><p>A zero-shot model answers two questions: is this an attack, and of which kind. Nothing is trained on your logs.</p></div>
+      <div data-reveal style="--i:3"><h3>Contained</h3><p>The agent reads the case and takes the least-risk action: ban, divert, virtual patch. Each has an inverse.</p></div>
+      <div data-reveal style="--i:4"><h3>Recorded</h3><p>Every tool call is appended to a hash-chained log with its input, result and case. A person gets the report.</p></div>
+    </div>
+  </section>
+
+  <section id="actions" class="bands" aria-labelledby="actions-title">
+    <div class="band band--head wrap">
+      <h2 id="actions-title" class="band__sentence" data-reveal>What it may do on its own</h2>
+    </div>
+    <div class="band wrap" data-on="true">
+      <p class="band__sentence" id="act-ban">Ban the attacker’s address</p>
+      <div class="band__switch" data-ui><button class="switch" role="switch" aria-checked="true" aria-labelledby="act-ban"></button></div>
+      <p class="band__more"><code>blacklist_ip</code>. Refused unless a malicious verdict for that source is on record. Undone by <code>unban_ip</code>.</p>
+    </div>
+    <div class="band wrap" data-on="true">
+      <p class="band__sentence" id="act-divert">Divert them to the decoy</p>
+      <div class="band__switch" data-ui><button class="switch" role="switch" aria-checked="true" aria-labelledby="act-divert"></button></div>
+      <p class="band__more"><code>divert_to_honeypot</code>. From then on that source sees a decoy, never your app. Undone by <code>undivert</code>.</p>
+    </div>
+    <div class="band wrap" data-on="true">
+      <p class="band__sentence" id="act-patch">Patch the route at the proxy</p>
+      <div class="band__switch" data-ui><button class="switch" role="switch" aria-checked="true" aria-labelledby="act-patch"></button></div>
+      <p class="band__more"><code>virtual_patch</code>. One vetted rule for that attack class on that route, for every source, without touching your code. Undone by <code>remove_vpatch</code>.</p>
+    </div>
+    <div class="band wrap" data-on="false">
+      <p class="band__sentence" id="act-quarantine">Quarantine the container</p>
+      <div class="band__switch" data-ui><button class="switch" role="switch" aria-checked="false" aria-labelledby="act-quarantine"></button></div>
+      <p class="band__more"><code>quarantine_container</code>. Off by default: it needs an operator’s approval. Undone by <code>release_container</code>.</p>
+    </div>
+    <div class="band wrap" data-on="false">
+      <p class="band__sentence" id="act-egress">Cut the container’s egress</p>
+      <div class="band__switch" data-ui><button class="switch" role="switch" aria-checked="false" aria-labelledby="act-egress"></button></div>
+      <p class="band__more"><code>isolate_egress</code>. Off by default: it needs an operator’s approval. Undone by <code>reconnect_egress</code>.</p>
+    </div>
+  </section>
+
+  <aside class="rampart wrap" aria-label="Where the name comes from">
+    <blockquote data-reveal>
+      <p>A bastion is the work most advanced toward the open country, made of two flanks and two faces.</p>
+      <cite>Definitions of the angles and sides of a pentagon fortified with simple bastions, 1726</cite>
+    </blockquote>
+    <figure data-reveal style="--i:1">
+      <img src="assets/definitions-1726.jpg" width="1690" height="750" alt="Printed definitions of the angles and sides of a fortified pentagon, 1726, in two columns of French" loading="lazy" decoding="async">
+      <figcaption>The definitions printed under the plate of 1726</figcaption>
+    </figure>
+  </aside>
+
+  <section id="undo" class="undo" aria-labelledby="undo-title" data-reverted="false">
+    <div class="undo__copy wrap on-field">
+      <h2 id="undo-title" class="head" data-reveal>One click <span id="undo-word">undoes</span> it</h2>
+      <p data-reveal style="--i:1">Every containment has an inverse. Undoing writes a new record to the same chain; the original stays where it was.</p>
+      <button class="link undo__reset" type="button" id="undo-reset">Put the ban back for another look</button>
+    </div>
+    <div class="revert" data-ui id="revert">
+      <div class="revert__case"><span><b>Case 9305</b> · sql injection · 203.0.113.9</span><samp>2 actions</samp></div>
+      <div class="revert__row revert__row--old">
+        <b>Banned 203.0.113.9</b>
+        <samp>blacklist_ip · case 9305 · <span class="ok">ok</span></samp>
+        <button class="revert__btn" type="button" id="revert-btn">Revert</button>
+      </div>
+      <div class="revert__row revert__row--new" aria-live="polite">
+        <b>Unbanned 203.0.113.9</b>
+        <samp>rollback · reverts the ban · unban_ip · <span class="ok">ok</span></samp>
+      </div>
+    </div>
+  </section>
+
+  <section id="about" class="about" aria-labelledby="about-title">
+    <div class="about__panel on-field">
+      <h2 id="about-title" class="head" data-reveal>Where intruders go, what you read</h2>
+      <figure class="about__figure" data-reveal>
+        <div class="shutter">
+          <img src="assets/plate-1693.jpg" width="1400" height="1044" alt="Engraved plan of a pentagon fortified with simple bastions, 1693, each bastion labelled with its faces, flanks and gorge, surveying tools in the margins" decoding="async">
+        </div>
+        <figcaption>Pentagone fortifié à simples bastions, engraved plate, 1693</figcaption>
+      </figure>
+      <div class="about__blocks">
+        <div data-reveal style="--i:1">
+          <h3>The decoy</h3>
+          <p>A diverted source is routed to a honeypot and does not reach your app again. Today the decoy is a static portal and every hit is logged with its technique. An adaptive decoy that answers in the shape of your own app is in development.</p>
+        </div>
+        <div data-reveal style="--i:2">
+          <h3>The report</h3>
+          <p>Each incident is mailed to a person: what the agent saw, what it did, and a link to the case file where any action can be undone. As virtual patches harden the app, the reports should thin out. That is the aim.</p>
+        </div>
+        <a class="button button--pale" href="#pilot" data-reveal style="--i:3">Request a pilot</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="questions" class="faq wrap" aria-labelledby="faq-title">
+    <div class="faq__grid">
+      <div class="faq__side">
+        <h2 id="faq-title" class="head" data-reveal>Questions you should ask</h2>
+      </div>
+      <div class="faq__list">
+        <details name="faq" data-reveal style="--i:1">
+          <summary>Does it train on my traffic?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>No. The classifier is zero-shot: for each request it is asked two fixed questions, whether this is an attempt to exploit the application and which category describes its intent. Nothing is fitted to your logs, so it works on the first day in front of any application.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:2">
+          <summary>What does the model see?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>The method, path, query and body of the request after redaction. Fields that look like passwords, tokens and cookies are replaced before anything is stored or sent. Headers and cookies are never persisted, and the source address is not part of the model’s input.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:3">
+          <summary>What if the classifier is unreachable?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>In observe and agent modes the request is forwarded and recorded, and judged when the service returns. In inline mode, where the verdict blocks the request itself, you choose per deployment whether an unreachable classifier lets traffic through or rejects it.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:4">
+          <summary>Can it ban a real user by mistake?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>Bans and diversions are refused unless a malicious verdict for that source is on record; traffic volume or path shape alone is not enough. If a ban is still wrong, it is undone in one click and the undo is logged as its own record.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:5">
+          <summary>What can it not undo?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>Killing a process or session and rotating a secret have no inverse, so they are marked irreversible, and like every privileged operation they need an operator’s approval before the agent may use them. Everything else it does has a named inverse.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:6">
+          <summary>How do I know the log was not edited?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>Each action record carries the hash of the previous one and its own hash over its contents. A verify call recomputes the chain from the first record and reports whether it is intact, how long it is, and where it breaks if it does. Nothing updates or deletes an action record; a change is always a new record.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:7">
+          <summary>What does an intruder see on the decoy?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>A static portal page for every route, served slowly on purpose, with each hit logged. An adaptive decoy that learns the shape of your real application and answers in it is in development, not yet shipped.</p></div>
+        </details>
+        <details name="faq" data-reveal style="--i:8">
+          <summary>What do I need to run it?<span class="plus" aria-hidden="true"></span></summary>
+          <div><p>A place to run a reverse proxy in front of your app, a key for the classifier, and for the autonomous agent a key for the language model it reasons with. Start in observe mode, read the reports, then switch on the actions you are comfortable with.</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section id="pilot" class="cta wrap" aria-labelledby="cta-title">
+    <h2 id="cta-title" class="sr-only">Request a pilot</h2>
+    <form class="cta__form" id="cta-form" action="mailto:hello@bastion.example" method="get">
+      <p class="cta__sentence" data-reveal>Put it in front of <label><span class="sr-only">Your application’s hostname</span><input class="cta__field" id="cta-app" name="app" type="text" placeholder="app.example.com" autocomplete="url"></label> and <button class="cta__send" type="submit">write to us</button></p>
+    </form>
+    <p class="cta__after" data-reveal style="--i:1">Opens your mail client with the address filled in. We answer by hand.</p>
+  </section>
+
+</main>
+
+<footer class="foot wrap on-field">
+  <div class="blocks" aria-label="Bastion" role="img">
+    <span style="--h:72%" aria-hidden="true">B</span><span style="--h:100%" aria-hidden="true">A</span><span style="--h:60%" aria-hidden="true">S</span><span style="--h:88%" aria-hidden="true">T</span><span style="--h:66%" aria-hidden="true">I</span><span style="--h:96%" aria-hidden="true">O</span><span style="--h:80%" aria-hidden="true">N</span>
+  </div>
+  <div class="foot__rows">
+    <nav class="foot__links" aria-label="Footer">
+      <a href="#how">How it works</a>
+      <a href="#actions">Actions</a>
+      <a href="#undo">Undo</a>
+      <a href="#questions">Questions</a>
+    </nav>
+    <div class="foot__contact">
+      <p><a href="mailto:hello@bastion.example">hello@bastion.example</a></p>
+      <p>Runs in front of your app, wherever it runs.</p>
+    </div>
+    <div class="foot__last">
+      <p class="foot__brand"><img src="assets/logo.png" width="22" height="23" alt="" decoding="async">© 2026 Bastion</p>
+      <a class="button button--pale" href="#pilot">Request a pilot</a>
+    </div>
+    <p class="credits">Pictures: <a href="https://commons.wikimedia.org/wiki/File:Vierde_plaat_met_de_vijfhoek_in_de_vestingbouw,_1693,_RP-P-OB-83.033A-10.jpg">“Vierde plaat met de vijfhoek in de vestingbouw, 1693”</a> and <a href="https://commons.wikimedia.org/wiki/File:Toepassing_van_de_vijfhoek_in_de_vestingbouw,_1726_Definitions_des_Anges_%26_des_c%C3%B4tes_du_pentagone_fortifi%C3%A9_%C3%A0_simples_Bastions_(titel_op_object)_Les_Forces_de_l%27Europe,_Asie,_Afrique_et_Amerique_Comm,_RP-P-OB-83.035-8.jpg">“Toepassing van de vijfhoek in de vestingbouw, 1726”</a>, Rijksmuseum, <a href="https://creativecommons.org/publicdomain/zero/1.0/deed.en">CC0</a>, via Wikimedia Commons. The interface pictures are Bastion’s own dashboard.</p>
+  </div>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>

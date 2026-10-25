@@ -36,15 +36,27 @@ services:
     # isolate_egress cuts (and reconnect_egress restores). See actuator.isolate_egress.
     networks: [edge, egress]
 
+  # Adaptive decoy (docs/DECOY.md). Learns the target's shape from the proxy's passive feed
+  # (shared data volume) and an optional GET-only crawl; LLM synthesis uses the keys in .env.
+  # It never forwards diverted traffic anywhere. `edge` is needed only for the crawl.
   honeypot:
     <<: *app
     command: ["python", "-m", "bastion.honeypot_app"]
+    env_file: .env
     environment:
       HONEYPOT_PORT: "9000"
       BASTION_DATA_DIR: /app/data
+      DECOY_CRAWL_URL: "${DECOY_CRAWL_URL:-http://dvwa:80}"
+      DECOY_CRAWL_PAGES: "${DECOY_CRAWL_PAGES:-40}"
+      DECOY_CRAWL_INTERVAL: "${DECOY_CRAWL_INTERVAL:-900}"
+      DECOY_LLM: "${DECOY_LLM:-1}"
+      DECOY_MODEL: "${DECOY_MODEL:-}"
+      DECOY_LLM_TIMEOUT: "${DECOY_LLM_TIMEOUT:-8}"
+      HONEYPOT_DELAY: "${HONEYPOT_DELAY:-0}"
     volumes: ["bastion-data:/app/data"]
+    networks: [default, edge]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/__health', timeout=3)"]
       interval: 10s
       timeout: 3s
       retries: 5

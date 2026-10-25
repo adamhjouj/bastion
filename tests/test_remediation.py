@@ -113,3 +113,20 @@ def test_restore_lab_skips_unpause_when_running_and_reports_failures(monkeypatch
 
 def test_restore_lab_rejects_unknown_level():
     assert rt.restore_lab(level="banana")["ok"] is False
+
+
+def test_restore_lab_reads_base_level_from_target(monkeypatch):
+    """Operator reset (level=None) restores the target's REAL base level, read from its own
+    APP_LEVEL via _base_level \u2014 proving it is not the hard-coded 'medium'."""
+    store.save_state({**store.load_state(), "enforced_security": "impossible"})
+    calls = []
+    monkeypatch.setattr(actuator, "_resolve", lambda t: "cid")
+    # the container reports APP_LEVEL=low (and reads back 'low' after the set); reset must
+    # restore to 'low', not the hard-coded 'medium'.
+    monkeypatch.setattr(actuator, "_docker", _fake_docker(calls, paused="false", level_after="low"))
+    monkeypatch.setattr(actuator, "release_container", lambda t: "released")
+    monkeypatch.setattr(actuator, "reconnect_egress", lambda t: "egress restored")
+    r = rt.restore_lab(level=None)
+    assert r["ok"] and r["level"] == "low"
+    assert any("$c['level'] = 'low';" in a[-1] for a in calls if a[0] == "exec")
+    assert "enforced_security" not in store.load_state()

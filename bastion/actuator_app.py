@@ -87,11 +87,12 @@ async def health():
 
 @app.post("/lab/restore")
 async def lab_restore():
-    """Operator lab reset: return the target to its exploitable default (unfreeze, reconnect
-    egress, level back to medium). Not exposed to the agent's tool catalog; restoring the
-    baseline is not a destructive action, so the destructive-tool policy does not gate it."""
+    """Operator lab reset: return the target to its exploitable base (unfreeze, reconnect
+    egress, and set the app back to its real base security level read from the target's own
+    APP_LEVEL \u2014 level=None, not a hard-coded value). Not exposed to the agent's tool
+    catalog; restoring the baseline is not destructive, so the destructive policy does not gate it."""
     async with _semaphore:
-        return await asyncio.to_thread(remediation_tools.restore_lab)
+        return await asyncio.to_thread(remediation_tools.restore_lab, level=None)
 
 
 @app.post("/tools/{name}")

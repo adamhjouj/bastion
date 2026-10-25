@@ -4,6 +4,7 @@ The *_FILE constants remain as logical stream identifiers for tool compatibility
 JSONL/state files are imported once, backed up, and never written during operation.
 """
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -21,6 +22,7 @@ EVENTS_FILE = DATA / "events.jsonl"
 INCIDENTS_FILE = DATA / "incidents.jsonl"
 ACTIONS_FILE = DATA / "actions.jsonl"
 DEFAULT_STATE = {"denylist": [], "honeypot": [], "seen_ips": {}, "vpatch": []}
+GENESIS_HASH = "0" * 64  # `audit.prev` of the first chained actions record
 _local = threading.local()
 
 
@@ -34,6 +36,35 @@ def now_plus(seconds):
 
 def active_ban(entry, at=None):
     return not entry.get("expires") or entry["expires"] > (at or now())
+
+
+def canonical_json(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def action_hash(prev, data_without_audit):
+    """Chain link: sha256(prev + "\n" + canonical_json(data)) per docs/CONTRACTS.md §3.2."""
+    return hashlib.sha256((prev + "\n" + canonical_json(data_without_audit)).encode("utf-8")).hexdigest()
+
+
+def _insert_action(db, item, status="done", case_id=None):
+    """The single insert path for kind='actions': links the row to the previous chained record.
+
+    Must run inside a BEGIN IMMEDIATE transaction (every caller uses connection(write=True))
+    so that reading the chain head and inserting the new link is atomic across the proxy,
+    blue agent and actuator processes. Records are hashed exactly as they will be re-read:
+    after a JSON round-trip, with any caller-supplied `audit` discarded.
+    """
+    payload = json.loads(json.dumps(item))
+    payload.pop("audit", None)
+    row = db.execute("SELECT json_extract(data,'$.audit.hash') AS head FROM records "
+                     "WHERE kind='actions' AND json_extract(data,'$.audit.hash') IS NOT NULL "
+                     "ORDER BY id DESC LIMIT 1").fetchone()
+    prev = row["head"] if row else GENESIS_HASH
+    payload["audit"] = {"prev": prev, "hash": action_hash(prev, payload)}
+    cursor = db.execute("INSERT INTO records(kind,ts,data,status,case_id) VALUES('actions',?,?,?,?)",
+                        (payload.get("ts", now()), json.dumps(payload), status, case_id))
+    return cursor.lastrowid
 
 
 def _open():
@@ -51,6 +82,7 @@ def _open():
           lease REAL DEFAULT 0, available REAL DEFAULT 0, case_id TEXT);
         CREATE INDEX IF NOT EXISTS queue_idx ON records(kind,status,available,id);
         CREATE INDEX IF NOT EXISTS time_idx ON records(kind,ts,id);
+        CREATE INDEX IF NOT EXISTS kind_id_idx ON records(kind,id);
         CREATE TABLE IF NOT EXISTS executions (
           key TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT, ts TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS outbox (
@@ -142,6 +174,9 @@ def initialize():
                     if path == EVENTS_FILE:
                         item.update(query="[legacy payload omitted]", body="[legacy payload omitted]")
                     kind = path.stem
+                    if kind == "actions":
+                        _insert_action(db, item)
+                        continue
                     db.execute("INSERT INTO records(kind,ts,data,status) VALUES(?,?,?,?)",
                                (kind, item.get("ts", now()), json.dumps(item),
                                 "pending" if kind == "events" else "done"))
@@ -183,6 +218,8 @@ def append_jsonl(path, obj):
     item = redact(obj)
     kind = Path(path).stem
     with connection(write=True) as db:
+        if kind == "actions":
+            return _insert_action(db, item, case_id=item.get("case_id"))
         cursor = db.execute("INSERT INTO records(kind,ts,data,status,case_id) VALUES(?,?,?,?,?)",
                             (kind, item.get("ts", now()), json.dumps(item),
                              "pending" if kind == "events" else "done", item.get("case_id")))
@@ -246,8 +283,8 @@ def finish_event(event_id, error=None, max_attempts=3):
         db.execute("UPDATE records SET status=?, available=?, lease=0 WHERE id=?",
                    (status, time.time() + delay, event_id))
         if error:
-            db.execute("INSERT INTO records(kind,ts,data) VALUES('actions',?,?)",
-                       (now(), json.dumps({"kind": "error", "case_id": str(event_id), "error": str(error)[:300], "status": status})))
+            _insert_action(db, {"ts": now(), "kind": "error", "case_id": str(event_id),
+                                "error": str(error)[:300], "status": status})
 
 
 def execute_once(key, fn):
@@ -341,7 +378,12 @@ def snapshot():
 
 
 def retain(days=30):
-    """Delete terminal records only. Never discard unfinished work silently."""
+    """Delete terminal records only. Never discard unfinished work silently.
+
+    Actions are never deleted: they are hash-chained (docs/CONTRACTS.md §0.6) and removing
+    the oldest link would make every later verification fail.
+    """
     cutoff = now_plus(-days * 86400)
     with connection(write=True) as db:
-        return db.execute("DELETE FROM records WHERE ts<? AND status IN ('done','dead')", (cutoff,)).rowcount
+        return db.execute("DELETE FROM records WHERE kind!='actions' AND ts<? AND status IN ('done','dead')",
+                          (cutoff,)).rowcount

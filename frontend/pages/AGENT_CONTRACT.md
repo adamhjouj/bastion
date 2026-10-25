@@ -1,87 +1,73 @@
-# Bastion dashboard — page agent contract
+# Bastion dashboard — frontend page contract
 
-You are building ONE page of a CSP-safe ES-module SPA. Read this fully, then read:
-`/Users/user/.agents/skills/emil-design-eng/SKILL.md` (apply it), `frontend/core.js`
-(exact exports), `frontend/app.css` + `frontend/pages/overview.css` (design tokens +
-components to reuse). Overview (`frontend/pages/overview.js`) is the reference for quality.
-
-## Ownership (hard boundary)
-Edit ONLY your two files: `frontend/pages/<X>.js` and `frontend/pages/<X>.css`
-(X = incidents | investigator | attacker). DO NOT touch any other file — not app.js,
-core.js, index.html, app.css, overview.*, or the other pages. DO NOT rebuild/recreate
-the docker image. Another agent owns each sibling page concurrently.
+Binding for every frontend agent. Read `docs/CONTRACTS.md` first (hard rules, file ownership,
+API contracts) — this file adds the frontend specifics. Edit ONLY the files in your ownership
+row. Another agent owns each sibling file concurrently.
 
 ## Module contract
-`export function mount(root) { … ; return function unmount(){…}; }`
-- `root` is an empty container. Append a `<div class="page p-<X>">` and build inside it.
-- Subscribe to live data in mount; return an `unmount` that cleans up EVERYTHING
-  (store unsubscribe, logStream close, clearInterval). The router calls unmount on nav away;
-  leaking intervals/EventSources is a bug — verify by navigating away and back.
-- Scope ALL your CSS under `.p-<X>`.
-
-## Imports (from `../core.js`)
-`el, clear, clip, humanize, fmt, fmtScore, clamp, smooth, hhmmss, anim, api, post,
-makeStream, store, controls, logStream, openIncident, closeDrawer, reduceMotion, API`
-- `store.subscribe(fn)->unsub` — fn(snapshot) on every snapshot and immediately with the latest.
-  Also `store.latest`, `store.conn`, `store.onConn(fn)`.
-- `makeStream(container, cap, makeNode)` — incremental newest-on-top live list:
-  `.syncNewestFirst(items)` (each item needs a stable `.k`), `.appendAscending(entries, reset)`, `.reset()`.
-- `api(path)` / `post(path, body)` — authed same-origin fetch; base `/__api/v1` is prepended.
-- `controls.status() | run(job) | stop() | reset()`.
-- `logStream(source, onPage)->close` — SSE container log; onPage receives `{entries:[{id,ts,text,stream}], reset}`.
-- `openIncident(id)` — opens the shared incident detail drawer (markup already in index.html).
-- `el(tag, cls, text)` builds elements with textContent; `anim(elm, keyframes, opts)` = WAAPI wrapper.
+`export function mount(root, ctx) { … ; return unmount; }`
+- `ctx = {sub, query}` from the hash router (`#/incidents/123` → `sub="123"`); tolerate `ctx` undefined.
+- `root` is empty. Append `<div class="page p-<X>">` and build inside it. Scope ALL CSS under `.p-<X>`.
+- `unmount()` must clean up everything (store unsubscribe, logStream close, clearInterval).
+  Optionally attach `unmount.navigate = ({sub, query}) => …` to handle sub-path changes in place.
+- Pages import from `../core.js`: `el, clear, clip, humanize, fmt, fmtScore, clamp, smooth, hhmmss, anim,
+  api, post, makeStream, store, controls, logStream, openIncident, closeDrawer, reduceMotion, API`.
+  `api(path)`/`post(path, body)` prepend `/__api/v1`; `store.subscribe(fn)` → unsub (fn called immediately
+  with the latest snapshot); `makeStream(container, cap, makeNode)` incremental newest-first list
+  (`syncNewestFirst(items)` with stable `.k`, `appendAscending(entries, reset)`, `reset()`).
 
 ## CSP (strict: default-src 'self'; script-src 'self'; style-src 'self')
-NO inline `<style>`/`<script>`, NO `style="…"` attributes. Dynamic styles via
-`element.style.setProperty(...)` / `element.style.x` / `classList` only. Dynamic text via
-`textContent` (use `el()`), never innerHTML with data. innerHTML is allowed ONLY for static
-markup you author (no inline style/script; SVG `fill`/`stroke` presentation attrs are fine).
-Put all styling in `<X>.css`.
+No inline `<style>`/`<script>`, no `style=""` attributes, no external fonts/scripts. Dynamic styles via
+`element.style.setProperty` / classList; dynamic text via `textContent` (use `el()`); `innerHTML` only
+for static markup you author. Everything in `<X>.css`.
 
-## Live data shape (snapshot from store.subscribe)
-`mode, events_total, incidents_total, blocked_total`;
-`funnel{evaluated, flagged, escalated, actions, succeeded}`;
-`events[]` (≤200: id, ts, ip, method, path, query, body, content_type, blocked, status,
-matched('diverted'|'denylist'|'vpatch'|'rate_limit'|'classifier'|null),
-verdict{malicious, malicious_score, attack_type, type_confidence}|null, case_id, processing_status, duration_ms);
-`actions[]` (≤200: kind 'triage'|'action'|'error'; triage→{ip,path,jev{malicious,malicious_score,attack_type,type_confidence},escalated,outcome}; action→{tool,input{reason,ip,path,…},result,outcome,case_id}; error→{error,case_id}; all have ts,id);
-`incidents[]` (≤50: id, ts, case_id, severity('low'|'medium'|'high'|'critical'), attack_type, source_ip, evidence, summary);
-`denylist[]{ip,reason,ts,expires}`, `honeypot[]{ip,reason,ts}`, `vpatch[]{id,path,pattern,attack_type,reason,ts}`;
-`enforced_security, health{<name>:{…,ts,age_seconds,stale, ready|available}}, recent_outcomes[],
-latest_containment{seconds,case_id}, allow_destructive, notifications[]`.
-Endpoints (via api/post): `/incidents?before=&limit=`, `/incidents/{id}` → `{incident, requests[], actions[], notifications[]}`,
-`/actions?case_id=&before=&limit=`, `/requests?before=&limit=`, `/notifications`,
-`/logs/{source}` + `/logs/{source}/stream` (sources: blue, proxy, dvwa, honeypot, actuator, mail-worker, red),
-`/control/status|run|stop|reset`.
+## Design direction — data-terminal (tasteskill v2 app sheet)
+A monitoring console read in long sessions. Flat, quiet, honest.
+- **Surfaces:** `--ground #0b0b0d`, `--surface #121214`, `--raised #17171a`, `--sunk #0e0e10`; separation by a
+  1px `--line` hairline or one tone step. **No gradients, glass, backdrop-blur, shadows at rest, glows.**
+  Radius 6px on panels/controls (8px on graph nodes). Shadow only on true overlays (the drawer).
+- **Type:** Public Sans (text) + JetBrains Mono (every figure, id, path, time; `tabular-nums`), self-hosted
+  in `frontend/fonts/`. Sizes: title 13–15 / body 12.5–13 / small 11–12. **Nothing under 11px. No tracked
+  uppercase labels** (sentence case, `--t-40`). Two greys that read apart: `--t-56` secondary, `--t-40` meta.
+- **Colour budget:** orange `--heat` (#fa5d19) **only on data/status** — malicious verdicts, high/critical
+  severity, rejected/error outcomes, the active campaign, the threat beam. Never on chrome, buttons, nav,
+  headings. Green `--pos` = healthy/ok/verified; `--neg` = failure/integrity broken. Everything else neutral.
+- **Components (global, reuse):** `.panel/.panel-head/.count/.panel-body/.empty`, `.row/.row-top/.row-type/
+  .row-time/.row-sub`, `.sev[data-sev]`, `.line/.label(.act)/.text(.cmd/.sys)/.meta` (trace lines),
+  `.kpi/.kpi-label/.kpi-val`, `.btn(.danger)/.ghost/.icon-btn/.cap/.tag`, `.kv`, `.mini`, `.status-pill`,
+  `.evidence`, `.prose`. Buttons are outlined neutral; one filled primary at most per screen.
+- **Information:** the screen's one question is answered by its biggest block; every block shares the
+  screen's edges (no dead bands, no stretched empties); zeros print as `0`, missing as `—`; numbers
+  right-aligned/tabular; words of the trade in labels ("Banned 203.0.113.9", not "Action executed").
+  Client-facing only: no infra telemetry (freshness ages, container names) unless it changes what the
+  operator should do.
+- **Motion:** feedback only (hover/press/focus, row arrival ≤220ms ease-out). Honour `reduceMotion`
+  (from core.js) for JS animations and `prefers-reduced-motion` in CSS. The Overview canvas is telemetry
+  and keeps running under reduced motion — do not change `createScene`.
+- **Gate:** `node /tmp/taste-skill/skills/taste-skill/scripts/lint.mjs --app frontend/` → **0 FAIL**
+  (WARNs for mono/overlay-shadow are accepted). Rules: `/tmp/taste-skill/skills/taste-skill/references/app-screens.md`.
 
-## Design system (reuse; match exactly)
-Tokens (CSS vars in app.css): `--bg #090909, --bg-2, --line, --line-2, --heat #fa5d19,
---heat-hi #ff8a4c, --text, --t-88…--t-4 (white alpha tiers), --glass, --card-sh, --mono,
---ease-out`. Reusable components (global): `.panel/.panel-head/.count/.panel-body/.empty`,
-`.row/.row-top/.row-type/.row-time/.row-sub`, `.sev[data-sev]`, `.line/.label(.act)/.text(.cmd/.sys)/.meta`,
-`.kpi/.kpi-label/.kpi-val`, `.btn(.danger)/.ghost/.icon-btn/.cap/.tag(.red)`, drawer styles.
-ACCENT DISCIPLINE: orange is reserved for threat/response signal only (malicious, high/critical
-severity, escalation, active/running); everything else neutral white tiers. Minimal, self-explanatory
-text — no verbose descriptions. The page scrolls internally if needed (the `.content` host is fixed-height; your `.p-<X>` is `height:100%`).
+## Data (snapshot) — see docs/CONTRACTS.md §2 for the full shape
+`events[]`, `actions[]` (kind triage|action|error; after BE-rollback lands each action carries
+`reversible`, `reverted_by`, `reverts`; after BE-audit lands `audit:{prev,hash}`), `incidents[]`,
+`funnel{}`, `denylist[]`, `honeypot[]`, `vpatch[]`, `health{}`, totals. Endpoints: `/incidents?before=&limit=`,
+`/incidents/{id}` → `{incident, requests[], actions[], notifications[]}`, `/actions?case_id=`,
+`/actions/{id}`, `POST /actions/{id}/rollback`, `/rollback/capabilities`, `/audit/verify`, `/audit/head`,
+`/logs/{source}/stream`, `/control/*`. **Degrade gracefully:** if a new endpoint 404s, hide the feature.
 
-## Deploy + test (NO image rebuild)
-- `TOK=$(grep '^MANAGEMENT_TOKEN=' .env | cut -d= -f2)`
-- Deploy ONLY your two files (served live via FileResponse):
-  `docker cp frontend/pages/<X>.js bastion-proxy-1:/app/frontend/pages/<X>.js`
-  `docker cp frontend/pages/<X>.css bastion-proxy-1:/app/frontend/pages/<X>.css`
-  Do NOT `docker cp` the whole `frontend/` dir (you'd clobber sibling agents' files).
-- Headless: `node` with `/Users/user/Desktop/soon/bastion/node_modules/playwright`,
-  `newContext({ httpCredentials:{username:'admin',password:TOK}, viewport:{width:1512,height:945},
-  deviceScaleFactor:2, colorScheme:'dark', reducedMotion:'reduce' })`, goto
-  `http://localhost:8080/__dash` waitUntil 'load', then `page.evaluate(()=>location.hash='#/<X>')`,
-  `waitForSelector('.p-<X>')`. Assert rich render from live data, empty states, zero console/page
-  errors, works under reduced motion, and unmount leaks nothing (nav away/back). Clean up /tmp artifacts.
-- Need data? curl benign `curl -s -o /dev/null http://localhost:8080/` and injections
-  `curl -s -o /dev/null "http://localhost:8080/s?id=1%27+OR+%271%27=%271"`. Attacker page may launch a
-  real short campaign via `/control/run` (LLM credits — sparingly; stop after).
-
-## Output
-Concise report: what you built, data/components used, verification evidence (screens/errors), and any
-assumptions. Do NOT bake the image (the parent bakes all pages together at the end). Stop/ask if the
-contract or data is insufficient rather than editing shared files.
+## Deploy + test (no image rebuild, never restart the proxy)
+- `TOK=$(grep '^MANAGEMENT_TOKEN=' .env | cut -d= -f2)`; dashboard `http://localhost:8080/__dash`.
+- Deploy ONLY your own files: `docker cp frontend/pages/<X>.js bastion-proxy-1:/app/frontend/pages/<X>.js`
+  (same for `.css`, `core.js`, `index.html`, `app.*` if you own them). Never cp the whole directory.
+- Headless: `node` + `/Users/user/Desktop/soon/bastion/node_modules/playwright`;
+  `newContext({ httpCredentials:{username:'admin',password:TOK}, viewport:{width:1440,height:900},
+  deviceScaleFactor:2, colorScheme:'dark', reducedMotion:'reduce' })`; `goto(..., {waitUntil:'load'})`
+  then `location.hash` + `waitForSelector('.p-<X>')`. **Never `networkidle`** (SSE holds the connection).
+  Write scripts to files (inline quoting breaks). Use `context.route(...)` to fulfil contract responses for
+  endpoints the backend hasn't shipped yet (`/__api/v1/stream` as `text/event-stream` with `event: snapshot`).
+- Free traffic: `curl -s -o /dev/null http://localhost:8080/` (benign) and
+  `curl -s -o /dev/null "http://localhost:8080/s?id=1%27+OR+%271%27=%271"` (classified malicious in ~5s).
+  Campaigns (`/control/run`) are real LLM runs — allowed, but not needed for layout work.
+- Verify: rich render + empty states, zero console/page errors, reduced motion, 1440/1024/768 (+390 for
+  Overview/Attacker), clean unmount (navigate away and back), lint 0 FAIL. View your own screenshots.
+- Clean up /tmp artifacts. End with `STATUS: done|partial|blocked` + evidence.

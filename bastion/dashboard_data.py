@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from bastion import log_store
+from bastion import rollback
 from bastion import store
 
 KINDS = {"events", "actions", "incidents"}
@@ -17,8 +18,11 @@ def record_page(kind, before=None, limit=100, case_id=None):
         rows = db.execute("SELECT id,data,status FROM records WHERE kind=? AND (? IS NULL OR id<?) "
                           "AND (? IS NULL OR COALESCE(case_id,json_extract(data,'$.case_id'))=?) "
                           "ORDER BY id DESC LIMIT ?", (kind, before, before, case_id, case_id, limit + 1)).fetchall()
+        reverted = rollback.reverted_map(db) if kind == "actions" else None
     more = len(rows) > limit
     items = [{**json.loads(r["data"]), "id": r["id"], "processing_status": r["status"]} for r in rows[:limit]]
+    if kind == "actions":
+        items = rollback.annotate(items, reverted)
     return {"items": items, "next_cursor": items[-1]["id"] if more and items else None}
 
 
@@ -122,6 +126,7 @@ def snapshot(mode=None):
         state_row = db.execute("SELECT data FROM state WHERE id=1").fetchone()
         state = json.loads(state_row[0]) if state_row else store.DEFAULT_STATE
         events, recent_actions, incidents = latest("events", 200), latest("actions", 200), latest("incidents", 50)
+        recent_actions = rollback.annotate(recent_actions, rollback.reverted_map(db))
         health = _health(db)
         containment = _latest_containment(db, incidents)
     allow_destructive = bool(state.get("allow_destructive")) or False

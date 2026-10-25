@@ -172,10 +172,12 @@ def _restore_target():
 
 
 def reset():
-    """Fully reset the lab. The target is restored first (unfrozen, egress reconnected, app
-    level back to medium), then the board is cleared: all requests, actions, incidents, logs,
-    queued mail, and live defenses (bans, honeypot diversions, virtual patches). Component
-    health is left untouched."""
+    """Fully reset the lab back to its pre-attack state. The target is restored first
+    (unfrozen, egress reconnected, app level set back to its real base \u2014 the target's own
+    APP_LEVEL, read from the container, not a hard-coded value), then the board is cleared:
+    all requests, actions, incidents, logs, queued mail, and live defenses (bans, honeypot
+    diversions, virtual patches) are wiped. This is the same net effect as reverting every
+    agent action. Component health is left untouched."""
     target = _restore_target()
     with store.connection(write=True) as db:
         cleared = {k: db.execute("SELECT COUNT(*) FROM records WHERE kind=?", (k,)).fetchone()[0]

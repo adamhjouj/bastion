@@ -15,6 +15,7 @@ from bastion import store
 from bastion.classifier import AsyncClassifier
 from bastion.dashboard_api import router as dashboard_router
 from bastion.dashboard_ui import router as dashboard_ui_router
+from bastion.audit import router as audit_router  # tamper-evident action log API
 from bastion.privacy import request_view
 from bastion.security import authorize, match_vpatch, source_ip as resolve_source
 from bastion.settings import Settings
@@ -121,6 +122,7 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
 
     app.include_router(dashboard_router)
     app.include_router(dashboard_ui_router)  # operator SPA at /__dash (auth + CSP inherited)
+    app.include_router(audit_router)  # /__api/v1/audit/* (auth inherited from the /__ middleware)
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
     async def forward(path: str, request: Request):
@@ -185,9 +187,11 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
         if st.get("enforced_security") and not divert:
             cookie = _enforce_security_cookie(cookie, st["enforced_security"])
         headers.append(("cookie", cookie))  # explicit even if empty: no shared client-cookie leakage
+        upstream_ms = None
         try:
             url = httpx.URL(target).copy_with(path="/" + path, query=raw_query)
             http = get_http()
+            upstream_started = time.monotonic()
             async with http.stream(request.method, url, headers=headers, content=bytes(body)) as up:
                 content = bytearray()
                 async for chunk in up.aiter_bytes():
@@ -197,8 +201,18 @@ def create_app(settings=None, upstream_transport=None, classifier_transport=None
                 response = Response(bytes(content), status_code=up.status_code)
                 # Preserve multiple Set-Cookie headers instead of collapsing into a dict.
                 response.raw_headers.extend([(k, v) for k, v in up.headers.raw if k.decode().lower() not in HOP])
+                upstream_ms = round((time.monotonic() - upstream_started) * 1000)
         except (httpx.HTTPError, ValueError):
             response = JSONResponse({"error": "upstream unavailable or response too large"}, status_code=502)
+        if upstream_ms is not None and not divert:
+            try:  # CONTRACTS §4.3: the decoy's passive learner; fire-and-forget, never affects forwarding
+                from bastion import decoy
+                decoy.observe(event["method"], event["path"], event["query"], response.status_code,
+                              response.raw_headers, bytes(content[:decoy.BODY_LIMIT]), upstream_ms,
+                              event["body"], event["content_type"],
+                              malicious=bool((event.get("verdict") or {}).get("malicious")))
+            except Exception:
+                pass
         return result(response, "diverted" if divert else None)
 
     return app

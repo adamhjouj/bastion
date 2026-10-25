@@ -7,12 +7,13 @@ import secrets
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from bastion import dashboard_data
 from bastion import log_store
 from bastion import operator_controls
+from bastion import rollback
 from bastion import store
 from bastion.notifications import MailError, send_email, prepare_message
 
@@ -75,6 +76,10 @@ class RetryNotificationBody(BaseModel):
     id: int
 
 
+class RollbackBody(BaseModel):
+    reason: str = ""
+
+
 class RunBody(BaseModel):
     job: str
 
@@ -102,6 +107,19 @@ def requests(before: int | None = Query(None, ge=1, le=9223372036854775807), lim
 def actions(before: int | None = Query(None, ge=1, le=9223372036854775807), limit: int = Query(100, ge=1, le=200),
             case_id: str | None = Query(None, max_length=1024)):
     return dashboard_data.record_page("actions", before, limit, case_id)
+
+
+@router.get("/actions/{action_id}")
+def action(action_id: int):
+    item = rollback.load_action(action_id)
+    if item is None:
+        raise HTTPException(404, "action not found")
+    return {"item": item}
+
+
+@router.get("/rollback/capabilities")
+def rollback_capabilities():
+    return {"inverse": dict(rollback.INVERSE), "irreversible": sorted(rollback.IRREVERSIBLE)}
 
 
 @router.get("/incidents", response_model=RecordPage)
@@ -137,15 +155,26 @@ def logs(source: str, after: int = Query(0, ge=0, le=9223372036854775807), limit
 
 # ---- operator control endpoints ----
 
+@router.post("/actions/{action_id}/rollback")
+async def rollback_action(action_id: int, body: RollbackBody | None = None):
+    """Revert one agent action through its inverse and append the compensating `rollback`
+    action to the audit chain (the original row is never modified). Contract: CONTRACTS §3.1."""
+    reason = body.reason[:500] if body else ""
+    try:
+        compensating = await asyncio.to_thread(rollback.rollback, action_id, reason)
+    except LookupError:
+        raise HTTPException(404, "action not found")
+    except rollback.RollbackRefused as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+    if compensating["outcome"] != "ok":
+        return JSONResponse({"ok": False, "error": compensating["result"], "action": compensating}, status_code=502)
+    return {"ok": True, "reverted": action_id, "action": compensating}
+
+
 @router.post("/defenses/unban")
 async def unban(body: IPBody):
     """Remove an active IP ban. Records the reversal in audit log."""
-    with store.state_lock:
-        st = store.load_state()
-        before = len(st["denylist"])
-        st["denylist"] = [d for d in st["denylist"] if d["ip"] != body.ip]
-        store.save_state(st)
-    removed = before - len(st["denylist"])
+    removed = rollback.release_ban(body.ip)
     store.append_jsonl(store.ACTIONS_FILE, {"ts": store.now(), "kind": "action", "tool": "operator_unban",
                                              "input": {"ip": body.ip, "reason": body.reason[:500]},
                                              "outcome": "ok", "result": f"Removed {removed} ban(s) for {body.ip}"})
@@ -155,12 +184,7 @@ async def unban(body: IPBody):
 @router.post("/defenses/undivert")
 async def undivert(body: IPBody):
     """Release a honeypot diversion, routing the source back to the real app."""
-    with store.state_lock:
-        st = store.load_state()
-        before = len(st.get("honeypot", []))
-        st["honeypot"] = [d for d in st.get("honeypot", []) if d["ip"] != body.ip]
-        store.save_state(st)
-    removed = before - len(st["honeypot"])
+    removed = rollback.release_diversion(body.ip)
     store.append_jsonl(store.ACTIONS_FILE, {"ts": store.now(), "kind": "action", "tool": "operator_undivert",
                                              "input": {"ip": body.ip, "reason": body.reason[:500]},
                                              "outcome": "ok", "result": f"Released {removed} diversion(s) for {body.ip}"})

@@ -1,17 +1,34 @@
-/* Overview — command center + the request-lifecycle graph (the product's signature
-   element; the .stage carries data-ui so its internal rules/beam are its own). Flat
-   surfaces, hairline separation, colour only on the data (threat beam, severity). */
+/* Overview — home: the defense pipeline (decisions) over the request-lifecycle graph
+   (routing; the product's signature element — the .stage carries data-ui so its internal
+   rules/beam are its own), the live request tape beside them, active defenses and the
+   latest case file below. Flat surfaces, hairline separation, orange only on threat data.
+   Grid at 1440x900: content 1184px = main 1.55fr (~718) + 14 gap + tape (~452); rows =
+   body (pipeline 128 + 14 + graph) + 14 + footer 42 — every block meets the canvas edges. */
 .p-overview { height: 100%; }
 .ov { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
 .ov-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1.55fr minmax(324px, 1fr); gap: 14px; }
+.ov-main { min-height: 0; display: flex; flex-direction: column; gap: 14px; }
 
-/* KPI band — one container split by 1px dividers, label over value */
-.ov-kpis { flex: 0 0 auto; display: grid; grid-template-columns: repeat(7, 1fr); border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
-.ov-kpis .kpi { align-items: flex-start; padding: 13px 16px; border-right: 1px solid var(--line); gap: 4px; }
-.ov-kpis .kpi:last-child { border-right: 0; }
+/* Defense pipeline — one container split by 1px dividers; the counts are the screen's
+   biggest figures; a proportional bar under each makes the drop-off visible. */
+.pipeline { flex: 0 0 auto; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
+.pl-head { display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.pl-head h2 { font-size: 13px; font-weight: 600; }
+.pl-steps { display: grid; grid-template-columns: repeat(3, 1fr); }
+.pl-step { position: relative; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 10px 14px 12px; border-right: 1px solid var(--line); color: inherit; }
+.pl-step:last-child { border-right: 0; }
+/* flow marker on the divider: the stages read left to right */
+.pl-step + .pl-step::before { content: "\203a"; position: absolute; left: -4px; top: 14px; font-size: 13px; line-height: 1; color: var(--t-32); background: var(--surface); padding: 0 1px; }
+.pl-label { font-size: 12px; font-weight: 500; color: var(--t-40); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-n { font-family: var(--mono); font-size: 28px; line-height: 1.15; font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.pl-n.hot { color: var(--heat-hi); }
+.pl-sub { font-size: 11.5px; color: var(--t-40); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-bar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: var(--t-8); overflow: hidden; }
+.pl-bar i { display: block; height: 100%; width: var(--w, 0%); border-radius: 2px; background: var(--t-56); transition: width 220ms var(--ease-out); }
+.pl-bar i.hot { background: var(--heat); }
 
 /* Hero stage */
-.stage { position: relative; min-height: 0; height: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--sunk); }
+.stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--sunk); }
 .stage canvas { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; }
 
 /* live request tape */
@@ -64,30 +81,42 @@
 .gnode.src .ntag { left: 50%; transform: translateX(-50%); }
 
 /* node positions (percent of stage) */
-.n-src { left: 84%; top: 50%; }
+/* flow reads left -> right: internet | Bastion wall | server / honeypot.
+   41px = (128px card - 46px source circle) / 2 keeps the outer edges symmetric. */
+.n-src { left: 16%; top: 50%; }
 .n-bastion { left: 50%; top: 50%; }
-.n-server { left: calc(16% + 41px); top: 78%; }
-.n-honeypot { left: calc(16% + 41px); top: 22%; }
+.n-server { left: calc(84% - 41px); top: 78%; }
+.n-honeypot { left: calc(84% - 41px); top: 22%; }
 .n-server, .n-honeypot { width: 128px; }
 
-/* footer: active defenses + latest incident */
-.ov-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
-.defenses { display: flex; gap: 8px; }
-.def-chip { display: flex; align-items: baseline; gap: 7px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-.def-n { font-family: var(--mono); font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
-.def-l { font-size: 12px; color: var(--t-40); }
-.latest { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; height: 42px; padding: 0 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: inherit; font: inherit; cursor: pointer; text-align: left; transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out); }
-.latest:hover:not(:disabled) { background: var(--raised); border-color: var(--line-2); }
-.latest:disabled { cursor: default; }
-.latest .sev { width: 7px; height: 7px; border-radius: 50%; background: var(--t-32); flex: 0 0 auto; }
-.latest .sev[data-sev="high"], .latest .sev[data-sev="critical"] { background: var(--heat); }
-.latest .sev[data-sev="medium"] { background: var(--t-56); }
-.latest-label { font-size: 12px; color: var(--t-40); }
-.latest-type { font-size: 13px; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.latest-none { font-size: 12.5px; color: var(--t-32); }
-.latest-time { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t-40); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-.latest-chev { font-size: 15px; line-height: 1; color: var(--t-32); flex: 0 0 auto; transition: color 160ms var(--ease-out), transform 160ms var(--ease-out); }
-.latest:hover:not(:disabled) .latest-chev { color: var(--t-56); transform: translateX(2px); }
+/* footer: active defenses + latest incident (a link to its case file) */
 
-@media (max-width: 1180px) { .ov-body { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1.3fr) minmax(0, 1fr); } }
-@media (max-width: 1000px) { .ov-kpis { grid-template-columns: repeat(4, 1fr); } .ov-kpis .kpi:nth-child(n+5) { border-top: 1px solid var(--line); } .defenses { display: none; } }
+/* 1024: one column — pipeline + graph above, the tape below */
+@media (max-width: 1180px) { .ov-body { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1.5fr) minmax(0, 1fr); } }
+/* narrow: three short stats still fit a row; stack only on a phone */
+@media (max-width: 560px) {
+  .pl-steps { grid-template-columns: 1fr; }
+  .pl-step { border-right: 0; border-bottom: 1px solid var(--line); }
+  .pl-step:last-child { border-bottom: 0; }
+  .pl-step + .pl-step::before { content: none; }
+}
+/* phone: the page scrolls; each block keeps a height it can answer its question in */
+@media (max-width: 760px) {
+  .ov { overflow-y: auto; }
+  .ov-body { display: flex; flex-direction: column; flex: 0 0 auto; }
+  .ov-main { flex: 0 0 auto; }
+  .stage { flex: 0 0 auto; height: 320px; }
+  .ov-stream { flex: 0 0 auto; height: 360px; }
+}
+/* narrow stage: pull the stations in so nothing overlaps the wall */
+@media (max-width: 480px) {
+  .n-src { left: 90%; }
+  .n-bastion { left: 60%; }
+  .n-server, .n-honeypot { left: 70px; width: 112px; }
+  .wall { width: 120px; }
+  .wall-core { padding: 10px 12px 10px 10px; gap: 8px; }
+  .wall-core .gic { width: 32px; height: 32px; }
+  .gnode { padding: 8px 10px 8px 8px; gap: 9px; }
+  .gic { width: 28px; height: 28px; }
+}
+@media (prefers-reduced-motion: reduce) { .pl-bar i { transition: none !important; } }

@@ -64,29 +64,32 @@ body { overflow: hidden; }
 h1, h2, h3 { margin: 0; font-weight: 600; }
 .num, .mono { font-variant-numeric: tabular-nums; }
 
-.app { position: relative; z-index: 1; display: grid; grid-template-columns: var(--side) 1fr; height: 100vh; }
+.app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100vh; }
 
-/* Sidebar */
-.side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--ground); padding: 16px 12px; gap: 2px; }
-.brand { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 8px; }
-.brand-mark { color: var(--heat); display: inline-flex; }
-.brand-mark svg { width: 20px; height: 20px; }
+/* Top bar: wordmark, four plain links, nothing else. The active link is the style's one
+   selection mark: a 1px accent line exactly as wide as its label, on the bar's bottom rule. */
+.top { flex: 0 0 auto; display: flex; align-items: stretch; gap: 28px; height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--ground); }
+.brand { display: flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; flex: 0 0 auto; }
+.brand:focus-visible { outline: 2px solid var(--control); outline-offset: -2px; }
+.brand-mark { display: block; width: 22px; height: 22px; object-fit: contain; }
 .brand-word { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
-.brand-scope { margin: 3px 8px 16px; font-family: var(--mono); font-size: 11px; color: var(--t-32); display: flex; align-items: center; gap: 6px; }
-.brand-scope .d { width: 6px; height: 6px; border-radius: 50%; background: var(--t-24); flex: 0 0 auto; }
-.brand-scope[data-live="1"] .d { background: var(--pos); }
 
-.nav { display: flex; flex-direction: column; gap: 1px; }
-.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 11px; border: 0; border-left: 2px solid transparent; background: transparent; color: var(--t-56); font: inherit; font-size: 13px; text-align: left; text-decoration: none; cursor: pointer; transition: color 140ms var(--ease-out), background 140ms var(--ease-out); }
-.nav-item svg { width: 16px; height: 16px; flex: 0 0 auto; stroke-width: 1.6; }
-.nav-item:hover { background: var(--raised); color: var(--t-88); }
-.nav-item.is-active { color: var(--text); background: var(--raised); border-left-color: var(--heat); }
-.nav-item:focus-visible { outline: 2px solid var(--control); outline-offset: -2px; }
+.nav { display: flex; align-items: stretch; gap: 22px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.nav::-webkit-scrollbar { display: none; }
+.nav-item { position: relative; display: flex; align-items: center; height: 100%; padding: 0; border: 0; background: transparent; color: var(--t-56); font: inherit; font-size: 13px; text-decoration: none; white-space: nowrap; cursor: pointer; transition: color 140ms var(--ease-out); }
+.nav-item::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: transparent; }
+.nav-item:hover { color: var(--t-88); }
+.nav-item.is-active { color: var(--text); }
+.nav-item.is-active::after { background: var(--heat); }
+.nav-item:focus-visible { outline: 2px solid var(--control); outline-offset: -4px; }
 
-.side-spacer { flex: 1 1 auto; min-height: 12px; }
+/* Only a lost feed is worth a word; hidden while healthy. */
+.feed { margin-left: auto; align-self: center; font-size: 12px; color: var(--neg); white-space: nowrap; }
+.feed::after { content: "\2026"; }
+.feed[hidden] { display: none; }
 
 /* Main column */
-.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1 1 auto; }
 .content { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 20px; }
 .page { height: 100%; min-height: 0; }
 
@@ -183,7 +186,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .status-pill[data-ok="1"] .d { background: var(--pos); }
 
 /* Responsive + reduced motion */
-@media (max-width: 760px) { .app { grid-template-columns: 1fr; } .side { display: none; } }
+@media (max-width: 760px) { .top { gap: 18px; padding: 0 14px; } .nav { gap: 16px; } .content { padding: 12px; } }
 @media (prefers-reduced-motion: reduce) {
   .nav-item, .btn, .ghost, .icon-btn, .row { transition: none !important; }
   .row.enter, .line.enter { animation: none !important; }

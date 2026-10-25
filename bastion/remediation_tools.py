@@ -86,21 +86,38 @@ def patch_vuln(level="impossible", target="dvwa"):
     return {"ok": ok, "level": new, "requested": level, "verified": ok}
 
 
+def _base_level(cid):
+    """The target's base security level is its own APP_LEVEL (bootstrap.php bakes
+    `getenv('APP_LEVEL') ?: 'medium'` into instance.php at boot). Read it from the live
+    container so a reset restores the real pre-attack level, never a hard-coded guess."""
+    try:
+        rc, out, _ = actuator._docker("exec", cid, "sh", "-c", 'printf %s "${APP_LEVEL:-medium}"')
+        lvl = (out or "").strip().lower()
+        return lvl if (rc == 0 and lvl in LEVELS) else "medium"
+    except Exception:
+        return "medium"
+
+
 def restore_lab(target="dvwa", level="medium"):
     """Undo every target-side change the blue team can make, so the lab is exploitable
     again: unfreeze a quarantined container, re-attach a cut egress network, and put the
-    app back at its exploitable default level. Each step is independent and reported; one
-    failing step never blocks the others. Proxy-side defenses (bans, diversions, virtual
-    patches) live in shared state and are cleared by the caller. Rotated credentials are
-    not reverted: the app config already matches the new secret, so the app keeps working."""
-    level = (level or "").lower()
-    if level not in LEVELS:
-        return {"ok": False, "error": f"invalid level {level!r}; choose one of {LEVELS}"}
+    app back at its real base security level. `level=None` (passed by the operator reset)
+    reads that base from the target's own APP_LEVEL via `_base_level` \u2014 looking at the
+    backend, never a hard-coded value; an explicit level overrides it. Each step is
+    independent and reported; one failing step never blocks the others. Proxy-side defenses
+    (bans, diversions, virtual patches) live in shared state and are cleared by the caller.
+    Rotated credentials are not reverted: the app config already matches the new secret."""
+    if level is not None:
+        level = (level or "").lower()
+        if level not in LEVELS:
+            return {"ok": False, "error": f"invalid level {level!r}; choose one of {LEVELS}"}
     steps = {}
     try:
         cid = actuator._resolve(target)
     except actuator.Rejected as e:
         return {"ok": False, "error": str(e)}
+    if level is None:
+        level = _base_level(cid)   # the real pre-attack base, read from the target
     rc, out, _ = actuator._docker("inspect", "--format", "{{.State.Paused}}", cid)
     if rc == 0 and out.strip() == "true":
         try:
