@@ -1,0 +1,153 @@
+name: bastion
+
+x-app: &app
+  image: bastion-app
+  build:
+    context: .
+    target: base
+  init: true
+  logging: &runtime-logging
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+
+services:
+  # De-fingerprinted vulnerable target (forked+mutated DVWA; see target_app/ and MUTATION.md).
+  # Service name kept as `dvwa` on purpose: it is internal-only (Docker DNS), never seen by the
+  # attacker/model, so renaming it would churn actuator/log/compose refs for zero de-fingerprint gain.
+  dvwa:
+    build:
+      context: ./target_app
+    image: bastion-target
+    logging: *runtime-logging
+    environment:
+      # Empty seed => fresh per-boot mutation. Set BASTION_SEED to pin a reproducible instance.
+      BASTION_SEED: "${BASTION_SEED:-}"
+      APP_LEVEL: "${APP_LEVEL:-medium}"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "php -r 'exit(@file_get_contents(\"http://127.0.0.1/\")===false?1:0);'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    # Two networks: `edge` (internal, no outbound) is the proxy<->app path that must
+    # survive containment; `egress` is the app's only outbound/C2/exfil route, which
+    # isolate_egress cuts (and reconnect_egress restores). See actuator.isolate_egress.
+    networks: [edge, egress]
+
+  honeypot:
+    <<: *app
+    command: ["python", "honeypot_app.py"]
+    environment:
+      HONEYPOT_PORT: "9000"
+      BASTION_DATA_DIR: /app/data
+    volumes: ["bastion-data:/app/data"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/', timeout=3)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # The ingress proxy enforces bans, rate limits, diversions and inline Jev.
+  # It has no Docker socket. The management endpoints require MANAGEMENT_TOKEN.
+  proxy:
+    <<: *app
+    command: ["./entrypoint-proxy.sh"]
+    env_file: .env
+    environment:
+      DVWA_URL: http://dvwa:80
+      HONEYPOT_URL: http://honeypot:9000
+      BASTION_DATA_DIR: /app/data
+      # Defaults; override in .env
+      RATE_LIMIT_MAX: "100"
+      RATE_LIMIT_WINDOW: "10"
+      BASTION_MODE: "${BASTION_MODE:-observe}"
+    ports: ["8080:8080"]
+    volumes: ["bastion-data:/app/data"]
+    # `default` keeps the proxy's outbound + honeypot path; `edge` is the internal-only
+    # link to the target so proxy<->app survives an egress cut.
+    networks: [default, edge]
+    depends_on:
+      dvwa:
+        condition: service_healthy
+      honeypot:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The actuator has the Docker socket. It is NOT network-reachable from outside.
+  # The blue agent reaches it via ACTUATOR_URL over the internal network.
+  actuator:
+    build:
+      context: .
+      target: actuator
+    image: bastion-actuator
+    init: true
+    logging: *runtime-logging
+    command: ["python", "-m", "uvicorn", "actuator_app:app", "--host", "0.0.0.0", "--port", "9010"]
+    environment:
+      BASTION_PROJECT: bastion
+      BASTION_TARGETS: dvwa
+      BASTION_DATA_DIR: /app/data
+      ACTUATOR_TOKEN: "${ACTUATOR_TOKEN}"
+      DVWA_URL: http://dvwa:80
+      ALLOW_DESTRUCTIVE: "${ALLOW_DESTRUCTIVE:-0}"
+      LOG_RETENTION_LINES: "${LOG_RETENTION_LINES:-1000}"
+    volumes:
+      - "bastion-data:/app/data"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    depends_on:
+      dvwa:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Independent email delivery: slow investigations cannot stall the outbox.
+  mail-worker:
+    <<: *app
+    command: ["python", "-u", "mail_worker.py"]
+    env_file: .env
+    environment:
+      BASTION_DATA_DIR: /app/data
+    volumes: ["bastion-data:/app/data"]
+    restart: unless-stopped
+
+  blue:
+    <<: *app
+    command: ["python", "-u", "blue_agent.py"]
+    env_file: .env
+    environment:
+      DVWA_URL: http://dvwa:80
+      ACTUATOR_URL: http://actuator:9010
+      BASTION_DATA_DIR: /app/data
+      BASTION_MODE: "${BASTION_MODE:-observe}"
+      ACTUATOR_TOKEN: "${ACTUATOR_TOKEN}"
+    volumes: ["bastion-data:/app/data"]
+    depends_on:
+      proxy:
+        condition: service_started
+      actuator:
+        condition: service_started
+    restart: unless-stopped
+
+  red:
+    <<: *app
+    profiles: ["red-team"]
+    command: ["python", "-u", "red_agent.py", "sqli"]
+    env_file: .env
+    environment:
+      PROXY_URL: http://proxy:8080
+      BASTION_DATA_DIR: /app/data
+    depends_on: [proxy]
+
+volumes:
+  bastion-data:
+
+networks:
+  # Default network: all services' general connectivity + outbound (blue/mail-worker need it).
+  default:
+  # Internal proxy<->target link: no outbound, so cutting egress can't be bypassed via it.
+  edge:
+    internal: true
+  # The target's outbound/C2/exfil route; isolate_egress disconnects the target from this.
+  egress:

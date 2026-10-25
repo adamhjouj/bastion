@@ -1,0 +1,29 @@
+# Development overrides: hot reloading without rebuilding images.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Backend:
+#   - proxy: uvicorn --reload restarts the app on any .py change automatically.
+#   - blue (and other python services): source is mounted; apply changes with
+#     `docker compose restart blue` (no image rebuild).
+#
+# The whole repo is mounted read-only at /app so edits are live. The named
+# bastion-data volume still owns /app/data, so persistence is unaffected.
+services:
+  proxy:
+    environment:
+      # /app is mounted read-only; don't try to write .pyc files there.
+      PYTHONDONTWRITEBYTECODE: "1"
+      # Enable application auto-reload on .py changes (uvicorn[standard] ships watchfiles).
+      # Exclude heavy/irrelevant trees so the watcher stays responsive.
+      UVICORN_EXTRA_ARGS: "--reload --reload-dir /app --reload-exclude node_modules/* --reload-exclude data/*"
+    volumes:
+      - ./:/app:ro
+      - bastion-data:/app/data
+
+  blue:
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./:/app:ro
+      - bastion-data:/app/data
