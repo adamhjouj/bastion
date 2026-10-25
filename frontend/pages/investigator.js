@@ -5,7 +5,7 @@
    component health strip, and the raw blue agent log. Pure consumer of the
    shared store snapshots + the blue container-log SSE. */
 
-import { store, el, clear, clip, humanize, fmt, fmtScore, hhmmss, anim, makeStream, logStream } from "../core.js";
+import { store, el, clear, clip, humanize, fmt, fmtScore, hhmmss, anim, reduceMotion, makeStream, logStream } from "../core.js";
 
 const STAGES = [["evaluated", "Evaluated"], ["flagged", "Flagged"], ["escalated", "Escalated"], ["actions", "Actions"]];
 const HEALTH = [["blue", "blue"], ["proxy", "proxy"], ["classifier", "classifier"], ["actuator", "actuator"], ["mail-worker", "mail worker"]];
@@ -47,7 +47,7 @@ const TEMPLATE = `
 function setNum(n, v) {
   if (!n || n._v === v) return;
   const prev = n._v; n._v = v; n.textContent = fmt(v);
-  if (prev != null && v > prev) anim(n, [{ color: "#ff8a4c" }, { color: getComputedStyle(n).color }], { duration: 600 });
+  if (!reduceMotion && prev != null && v > prev) anim(n, [{ color: "#ff8a4c" }, { color: getComputedStyle(n).color }], { duration: 400 });
 }
 function fmtAge(x) { x = Math.max(0, Math.round(x)); return x < 60 ? x + "s" : x < 3600 ? Math.round(x / 60) + "m" : Math.round(x / 3600) + "h"; }
 

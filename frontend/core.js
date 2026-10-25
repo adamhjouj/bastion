@@ -88,13 +88,15 @@ export function logStream(source, onPage) {
 const drawer = document.querySelector("[data-drawer]");
 const scrim = document.querySelector("[data-scrim]");
 const drawerBody = document.querySelector("[data-drawer-body]");
+let returnFocus = null;
 function kv(cap, value, mono) { const d = el("div"); d.appendChild(el("span", "cap", cap)); d.appendChild(el("span", "v" + (mono ? " mono" : ""), value || "—")); return d; }
 function section(title) { const s = el("div", "sec"); s.appendChild(el("span", "cap", title)); return s; }
 
 export async function openIncident(id) {
   if (!drawer) return;
+  returnFocus = document.activeElement;
   scrim.hidden = false;
-  requestAnimationFrame(() => { scrim.classList.add("show"); drawer.classList.add("open"); });
+  requestAnimationFrame(() => { scrim.classList.add("show"); drawer.classList.add("open"); const cb = document.querySelector("[data-close]"); if (cb) cb.focus(); });
   drawer.setAttribute("aria-hidden", "false");
   clear(drawerBody); drawerBody.appendChild(el("div", "empty", "Loading…"));
   let data; try { data = await api("/incidents/" + id); } catch (_) { clear(drawerBody); drawerBody.appendChild(el("div", "empty", "Could not load incident.")); return; }
@@ -119,10 +121,23 @@ export function closeDrawer() {
   if (!drawer) return;
   drawer.classList.remove("open"); scrim.classList.remove("show"); drawer.setAttribute("aria-hidden", "true");
   const done = () => { scrim.hidden = true; };
-  if (reduceMotion) done(); else setTimeout(done, 340);
+  if (reduceMotion) done(); else setTimeout(done, 260);
+  if (returnFocus && returnFocus.focus) { try { returnFocus.focus(); } catch (_) {} }
+  returnFocus = null;
 }
 if (drawer) {
   document.querySelector("[data-close]").addEventListener("click", closeDrawer);
   scrim.addEventListener("click", closeDrawer);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) closeDrawer(); });
+  document.addEventListener("keydown", (e) => {
+    if (!drawer.classList.contains("open")) return;
+    if (e.key === "Escape") { closeDrawer(); return; }
+    if (e.key === "Tab") {
+      const f = drawer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (!drawer.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
 }

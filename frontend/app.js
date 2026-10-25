@@ -17,7 +17,6 @@ const ROUTES = {
 };
 
 const view = document.getElementById("view");
-const crumb = document.querySelector("[data-crumb]");
 let unmount = null;
 
 function routePath() {
@@ -29,7 +28,6 @@ function render() {
   const path = routePath(), route = ROUTES[path];
   if (unmount) { try { unmount(); } catch (_) {} unmount = null; }
   clear(view);
-  if (crumb) crumb.textContent = route.title;
   document.querySelectorAll(".nav-item").forEach((a) => a.classList.toggle("is-active", a.dataset.route === path));
   try { unmount = route.mount(view) || null; } catch (e) { view.appendChild(Object.assign(document.createElement("div"), { className: "empty", textContent: "This view failed to load." })); }
 }

@@ -21,7 +21,7 @@ const TEMPLATE = `
   </div>
   <section class="stage" aria-label="Live request lifecycle">
     <canvas data-canvas></canvas>
-    <div class="gnode src n-src" data-node="src"><span class="gic">${ICON.src}</span></div>
+    <div class="gnode src n-src" data-node="src"><span class="gic">${ICON.src}</span><span class="ntag">internet</span></div>
     <div class="wall n-bastion" data-node="bastion">
       <span class="wall-beam"></span>
       <span class="wall-core"><span class="gic">${ICON.bastion}</span><span class="gmeta"><span class="gname">Bastion</span><span class="gcount" data-c="bastion">0</span></span><span class="ntag">defense</span></span>
@@ -248,6 +248,7 @@ function updateLatest(page, s) {
   btn.appendChild(el("span", "latest-label", "Latest"));
   btn.appendChild(el("span", "latest-type", clip(humanize(inc.attack_type) || "incident", 46)));
   btn.appendChild(el("time", "latest-time", hhmmss(inc.ts)));
+  btn.appendChild(el("span", "latest-chev", "\u203a"));
 }
 function clip(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
@@ -260,20 +261,6 @@ export function mount(root) {
   const scene = createScene(page);
   const latestBtn = page.querySelector("[data-latest]");
   if (latestBtn) latestBtn.addEventListener("click", () => { if (latestBtn.dataset.id) openIncident(latestBtn.dataset.id); });
-  const wallEl = page.querySelector(".wall");
-  let thinkTimer = 0;
-  function setProcessing(on) {
-    if (!wallEl) return;
-    if (on) { clearTimeout(thinkTimer); thinkTimer = 0; wallEl.classList.add("is-processing"); }
-    else if (!thinkTimer) { thinkTimer = setTimeout(() => { wallEl.classList.remove("is-processing"); thinkTimer = 0; }, 900); } // linger so fast investigations still flash
-  }
-  const unsub = store.subscribe((s) => {
-    if (!s) return;
-    scene.update(s); updateKpis(page, s); updateDefenses(page, s); updateLatest(page, s);
-    const f = s.funnel || {};
-    // backlog the defense hasn't finished adjudicating = classifier/investigator (DeepSeek) is working
-    const awaiting = (s.events_total || 0) - (s.blocked_total || 0) - (s.diverted_total || 0) - (f.evaluated || 0);
-    setProcessing(awaiting > 0);
-  });
-  return function unmount() { clearTimeout(thinkTimer); unsub(); scene.destroy(); };
+  const unsub = store.subscribe((s) => { if (!s) return; scene.update(s); updateKpis(page, s); updateDefenses(page, s); updateLatest(page, s); });
+  return function unmount() { unsub(); scene.destroy(); };
 }

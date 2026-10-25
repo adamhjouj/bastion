@@ -7,7 +7,7 @@
 .p-investigator .inv-funnel { flex: 0 0 auto; }
 .p-investigator .funnel { display: grid; grid-template-columns: 1fr 44px 1fr 44px 1fr 44px 1fr; align-items: stretch; padding: 13px 16px 15px; }
 .p-investigator .f-stage { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-.p-investigator .f-label { font-size: 9px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--t-32); }
+.p-investigator .f-label { font-size: 9px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--t-40); }
 .p-investigator .f-val { font-family: var(--mono); font-size: 21px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
 .p-investigator .f-bar { display: block; height: 5px; border-radius: 3px; background: var(--t-6); overflow: hidden; }
 .p-investigator .f-fill { display: block; height: 100%; width: 0%; border-radius: inherit; background: var(--t-40); transition: width 420ms var(--ease-out); }
@@ -16,7 +16,7 @@
 .p-investigator .f-stage[data-stage="actions"] .f-fill { background: linear-gradient(90deg, var(--heat), var(--heat-hi)); }
 .p-investigator .f-sep { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
 .p-investigator .f-sep::before { content: "→"; font-size: 11px; line-height: 1; color: var(--t-16); }
-.p-investigator .f-pct { font-family: var(--mono); font-size: 9.5px; color: var(--t-32); font-variant-numeric: tabular-nums; }
+.p-investigator .f-pct { font-family: var(--mono); font-size: 9.5px; color: var(--t-40); font-variant-numeric: tabular-nums; }
 
 /* ---- main grid: reasoning + log | defenses ---- */
 .p-investigator .inv-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; }
@@ -40,7 +40,7 @@
 .p-investigator .d-row { padding: 9px 14px; border-bottom: 1px solid var(--t-4); }
 .p-investigator .d-top { display: flex; align-items: baseline; gap: 10px; }
 .p-investigator .d-key { font-family: var(--mono); font-size: 11.5px; color: var(--t-88); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.p-investigator .d-aside { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-32); flex: 0 0 auto; }
+.p-investigator .d-aside { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-40); flex: 0 0 auto; }
 .p-investigator .d-sub { margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--t-40); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .p-investigator .d-sub.mono { font-family: var(--mono); font-size: 10px; }
 
@@ -51,7 +51,7 @@
 .p-investigator .hs.on .hs-dot { background: var(--heat); box-shadow: 0 0 8px rgba(250, 93, 25, 0.6); }
 .p-investigator .hs-name { font-size: 11.5px; font-weight: 500; color: var(--t-72); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-investigator .hs.stale .hs-name { color: var(--t-32); }
-.p-investigator .hs-age { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-32); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.p-investigator .hs-age { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-40); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 
 /* ---- responsive + reduced motion ---- */
 @media (max-width: 1100px) {

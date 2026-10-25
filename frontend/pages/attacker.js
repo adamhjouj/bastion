@@ -5,12 +5,22 @@
    source IP. Narration, '-> METHOD path' request lines, and '[operator]' system lines
    are styled distinctly; orange is reserved for the active campaign and attack traffic. */
 
-import { el, clear, hhmmss, clip, fmt, humanize, anim, controls, logStream, store, makeStream } from "../core.js";
+import { el, clear, hhmmss, clip, fmt, humanize, anim, reduceMotion, controls, logStream, store } from "../core.js";
 
 const JOBS = [["attack-sqli", "SQLi"], ["attack-cmdi", "CMDi"], ["attack-lfi", "LFI"], ["attack-xss", "XSS"]];
 const COUNTS = [["requests", "Requests"], ["blocked", "Blocked"], ["incidents", "Incidents"]];
 const EMPTY_TRACE = "No campaign running. Launch one above to watch the red agent reason in real time.";
 const REQ_METHOD = /^(GET|POST|PUT|DELETE|PATCH|HEAD)\s+(.*)$/;
+
+/* Strip light markdown so the reasoning reads as clean prose (CSP-safe, text only). */
+function stripMd(s) {
+  return String(s == null ? "" : s)
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "\u2022 ");
+}
 
 /* Parse one red-source log line into a styled trace item (or null to skip). */
 function parseLine(e) {
@@ -25,7 +35,7 @@ function parseLine(e) {
     if (req.startsWith("authenticate")) return { kind: "request", label: "request", method: "AUTH", path: req.replace(/^authenticate/, "") };
     return { kind: "request", label: "request", method: "→", path: req };
   }
-  return { kind: "reason", label: "reason", content: body };
+  return { kind: "reason", label: "reason", content: stripMd(body) };
 }
 
 export function mount(root) {
@@ -135,7 +145,7 @@ export function mount(root) {
   async function refresh() { try { apply(await controls.status()); } catch (_) {} }
 
   /* ---------------- attack context (live counts scoped to the source IP) ---------------- */
-  function setCount(k, v) { const n = cbody.querySelector('[data-k="' + k + '"]'); if (!n) return; const prev = n._v; n.textContent = fmt(v); if (prev != null && v > prev) anim(n, [{ color: "#ff8a4c" }, { color: getComputedStyle(n).color }], { duration: 650 }); n._v = v; }
+  function setCount(k, v) { const n = cbody.querySelector('[data-k="' + k + '"]'); if (!n) return; const prev = n._v; n.textContent = fmt(v); if (!reduceMotion && prev != null && v > prev) anim(n, [{ color: "#ff8a4c" }, { color: getComputedStyle(n).color }], { duration: 400 }); n._v = v; }
 
   function renderContext(s) {
     const ev = (s && s.events) || [], inc = (s && s.incidents) || [];
@@ -156,8 +166,9 @@ export function mount(root) {
   }
 
   /* ---------------- live red reasoning trace ---------------- */
-  const stream = makeStream(lines, 300, (item) => {
+  function traceNode(item) {
     const line = el("div", "line");
+    line.dataset.k = item.k;
     line.appendChild(el("time", null, hhmmss(item.ts)));
     const b = el("div", "body");
     b.appendChild(el("div", "label" + (item.kind === "request" ? " act" : ""), item.label));
@@ -173,13 +184,33 @@ export function mount(root) {
     }
     line.appendChild(b);
     return line;
-  });
+  }
+
+  /* Narrative reads top-to-bottom (oldest -> newest), auto-scrolled to the latest
+     line unless the operator has scrolled up to read history. */
+  const seen = new Set();
+  let firstBatch = true;
+  function resetTrace() { clear(lines); seen.clear(); firstBatch = true; }
+  function appendTrace(items) {
+    if (!items.length) return;
+    const e = lines.querySelector(".empty"); if (e) e.remove();
+    const stick = lines.scrollTop + lines.clientHeight >= lines.scrollHeight - 48;
+    for (const it of items) {
+      if (seen.has(it.k)) continue;
+      seen.add(it.k);
+      const n = traceNode(it); if (!firstBatch) n.classList.add("enter");
+      lines.appendChild(n);
+    }
+    firstBatch = false;
+    while (lines.children.length > 300) { const f = lines.firstChild; if (f.dataset && f.dataset.k != null) seen.delete(f.dataset.k); lines.removeChild(f); }
+    if (stick) lines.scrollTop = lines.scrollHeight;
+  }
 
   const closeLog = logStream("red", (pg) => {
-    if (pg.reset) stream.reset();
+    if (pg.reset) resetTrace();
     const items = [];
     for (const e of pg.entries || []) { const p = parseLine(e); if (p) items.push(Object.assign({ k: e.id, ts: e.ts }, p)); }
-    if (items.length) stream.appendAscending(items, false);
+    appendTrace(items);
     const n = lines.querySelectorAll(".line").length;
     lineCount.textContent = fmt(n);
     if (!n && !lines.querySelector(".empty")) lines.appendChild(el("div", "empty", EMPTY_TRACE));
