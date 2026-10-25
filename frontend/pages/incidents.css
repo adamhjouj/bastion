@@ -8,20 +8,18 @@
 
 /* list toolbar: search + severity chips */
 .p-incidents .inc-tools { flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.p-incidents .inc-search { height: 30px; padding: 0 11px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--t-4); color: var(--text); font: inherit; font-size: 12px; outline: none; transition: border-color 160ms var(--ease-out), background 160ms var(--ease-out); }
+.p-incidents .inc-search { height: 30px; padding: 0 11px; border: 1px solid var(--control); border-radius: 6px; background: var(--sunk); color: var(--text); font: inherit; font-size: 12.5px; outline: none; transition: border-color 160ms var(--ease-out); }
 .p-incidents .inc-search::placeholder { color: var(--t-32); }
-.p-incidents .inc-search:focus { border-color: var(--t-24); background: var(--t-6); }
+.p-incidents .inc-search:focus { border-color: var(--t-40); }
 .p-incidents .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.p-incidents .chip { height: 24px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t-40); font: inherit; font-size: 10.5px; letter-spacing: 0.03em; cursor: pointer; transition: background 160ms var(--ease-out), color 160ms var(--ease-out), border-color 160ms var(--ease-out), transform 120ms var(--ease-out); }
-.p-incidents .chip:hover { color: var(--t-72); background: var(--t-4); }
-.p-incidents .chip:active { transform: scale(0.96); }
-.p-incidents .chip:focus-visible { outline: 2px solid var(--t-40); outline-offset: 2px; }
-.p-incidents .chip.on { color: var(--t-88); border-color: var(--line-2); background: var(--t-8); }
-.p-incidents .chip.on[data-sev="critical"], .p-incidents .chip.on[data-sev="high"] { color: var(--heat-hi); border-color: var(--heat-24); background: var(--heat-10); }
+.p-incidents .chip { height: 25px; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--t-40); font: inherit; font-size: 12px; cursor: pointer; transition: background 160ms var(--ease-out), color 160ms var(--ease-out), border-color 160ms var(--ease-out); }
+.p-incidents .chip:hover { color: var(--t-72); background: var(--raised); }
+.p-incidents .chip:focus-visible { outline: 2px solid var(--control); outline-offset: 2px; }
+.p-incidents .chip.on { color: var(--text); border-color: var(--control); background: var(--raised); }
 
 /* rows: smooth selection highlight (global .row supplies base + hover) */
 .p-incidents .row { transition: background 160ms var(--ease-out), box-shadow 200ms var(--ease-out); }
-.p-incidents .row.sel { background: var(--t-6); box-shadow: inset 2px 0 0 var(--t-40); }
+.p-incidents .row.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--heat); }
 .p-incidents .row.sel .row-type { color: var(--text); }
 .p-incidents .row.sel .row-time { color: var(--t-56); }
 

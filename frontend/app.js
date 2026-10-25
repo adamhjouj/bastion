@@ -34,4 +34,17 @@ function render() {
 
 window.addEventListener("hashchange", render);
 render();
+
+/* sidebar scope — the product's mode and live connection state */
+const scope = document.querySelector("[data-scope]");
+const scopeText = document.querySelector("[data-scope-text]");
+let _mode = "";
+function paintScope(conn) {
+  if (!scope) return;
+  scope.dataset.live = conn === "live" ? "1" : "0";
+  if (scopeText) scopeText.textContent = (_mode ? _mode + " \u00b7 " : "") + (conn === "live" ? "live" : conn === "connecting" ? "connecting" : "offline");
+}
+store.onConn(paintScope);
+store.subscribe((s) => { if (s && s.mode && s.mode !== _mode) { _mode = s.mode; paintScope(store.conn); } });
+
 store.start();

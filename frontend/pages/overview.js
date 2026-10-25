@@ -4,7 +4,7 @@
    strip + latest-incident link. The graph animation is a pure consumer of backend
    counter deltas (a dot never advances until that node's counter increments). */
 
-import { store, el, clear, clamp, smooth, anim, hhmmss, humanize, fmt, openIncident } from "../core.js";
+import { store, el, clear, clamp, smooth, anim, hhmmss, humanize, fmt, makeStream, openIncident } from "../core.js";
 
 const ICON = {
   src: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
@@ -19,7 +19,8 @@ const TEMPLATE = `
   <div class="ov-kpis">
     ${KPIS.map(([k, label]) => `<div class="kpi"><span class="kpi-label">${label}</span><span class="kpi-val" data-k="${k}">0</span></div>`).join("")}
   </div>
-  <section class="stage" aria-label="Live request lifecycle">
+  <div class="ov-body">
+  <section class="stage" data-ui aria-label="Live request lifecycle">
     <canvas data-canvas></canvas>
     <div class="gnode src n-src" data-node="src"><span class="gic">${ICON.src}</span><span class="ntag">internet</span></div>
     <div class="wall n-bastion" data-node="bastion">
@@ -30,6 +31,11 @@ const TEMPLATE = `
     <div class="gnode n-honeypot" data-node="honeypot"><span class="gic">${ICON.honeypot}</span><span class="gmeta"><span class="gname">Honeypot</span><span class="gcount" data-c="honeypot">0</span></span><span class="ntag">diverted</span></div>
     <div class="legend" aria-hidden="true"><span><i class="d safe"></i>safe</span><span><i class="d threat"></i>suspicious</span></div>
   </section>
+  <section class="panel ov-stream" aria-label="Live requests">
+    <div class="panel-head"><h2>Live requests</h2><span class="count" data-stream-n>0</span></div>
+    <div class="panel-body" data-stream><div class="empty">Waiting for traffic.</div></div>
+  </section>
+  </div>
   <div class="ov-foot">
     <div class="defenses">
       <div class="def-chip"><span class="def-n" data-def="bans">0</span><span class="def-l">bans</span></div>
@@ -252,6 +258,19 @@ function updateLatest(page, s) {
 }
 function clip(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
+/* live request tape — one line per request, coloured only when the defense acted */
+function eventNode(item) {
+  const e = item.e;
+  const line = el("div", "ev");
+  line.appendChild(el("time", null, hhmmss(e.ts)));
+  line.appendChild(el("span", "ev-method", e.method || "GET"));
+  line.appendChild(el("span", "ev-path", clip((e.path || "/") + (e.query ? "?" + e.query : ""), 48)));
+  const mal = !!((e.verdict && e.verdict.malicious) || e.blocked || e.matched === "diverted" || e.matched === "denylist");
+  const out = e.blocked ? "blocked" : e.matched === "diverted" ? "diverted" : (e.verdict && e.verdict.malicious) ? "flagged" : (e.status == null ? "\u2014" : String(e.status));
+  line.appendChild(el("span", "ev-out" + (mal ? " hot" : ""), out));
+  return line;
+}
+
 /* =================== mount =================== */
 export function mount(root) {
   const wrap = el("div", "page p-overview");
@@ -261,6 +280,17 @@ export function mount(root) {
   const scene = createScene(page);
   const latestBtn = page.querySelector("[data-latest]");
   if (latestBtn) latestBtn.addEventListener("click", () => { if (latestBtn.dataset.id) openIncident(latestBtn.dataset.id); });
-  const unsub = store.subscribe((s) => { if (!s) return; scene.update(s); updateKpis(page, s); updateDefenses(page, s); updateLatest(page, s); });
+  const streamBody = page.querySelector("[data-stream]");
+  const streamN = page.querySelector("[data-stream-n]");
+  const stream = makeStream(streamBody, 60, eventNode);
+  let streamHas = false;
+  const unsub = store.subscribe((s) => {
+    if (!s) return;
+    scene.update(s); updateKpis(page, s); updateDefenses(page, s); updateLatest(page, s);
+    const evs = (s.events || []).slice().sort((a, b) => (b.id || 0) - (a.id || 0)).slice(0, 60).map((e) => ({ k: "e" + e.id, e }));
+    if (streamN) streamN.textContent = fmt(s.events_total || 0);
+    if (!evs.length) { if (streamHas) { stream.reset(); streamBody.appendChild(el("div", "empty", "Waiting for traffic.")); streamHas = false; } }
+    else { streamHas = true; stream.syncNewestFirst(evs); }
+  });
   return function unmount() { unsub(); scene.destroy(); };
 }

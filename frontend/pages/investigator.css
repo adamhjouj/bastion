@@ -7,16 +7,16 @@
 .p-investigator .inv-funnel { flex: 0 0 auto; }
 .p-investigator .funnel { display: grid; grid-template-columns: 1fr 44px 1fr 44px 1fr 44px 1fr; align-items: stretch; padding: 13px 16px 15px; }
 .p-investigator .f-stage { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-.p-investigator .f-label { font-size: 9px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--t-40); }
-.p-investigator .f-val { font-family: var(--mono); font-size: 21px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
+.p-investigator .f-label { font-size: 12px; font-weight: 500; color: var(--t-40); }
+.p-investigator .f-val { font-family: var(--mono); font-size: 20px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
 .p-investigator .f-bar { display: block; height: 5px; border-radius: 3px; background: var(--t-6); overflow: hidden; }
 .p-investigator .f-fill { display: block; height: 100%; width: 0%; border-radius: inherit; background: var(--t-40); transition: width 420ms var(--ease-out); }
 .p-investigator .f-stage[data-stage="flagged"] .f-fill { background: rgba(250, 93, 25, 0.55); }
-.p-investigator .f-stage[data-stage="escalated"] .f-fill { background: var(--heat); box-shadow: 0 0 9px rgba(250, 93, 25, 0.45); }
-.p-investigator .f-stage[data-stage="actions"] .f-fill { background: linear-gradient(90deg, var(--heat), var(--heat-hi)); }
+.p-investigator .f-stage[data-stage="escalated"] .f-fill { background: var(--heat); }
+.p-investigator .f-stage[data-stage="actions"] .f-fill { background: var(--heat); }
 .p-investigator .f-sep { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
 .p-investigator .f-sep::before { content: "→"; font-size: 11px; line-height: 1; color: var(--t-16); }
-.p-investigator .f-pct { font-family: var(--mono); font-size: 9.5px; color: var(--t-40); font-variant-numeric: tabular-nums; }
+.p-investigator .f-pct { font-family: var(--mono); font-size: 11px; color: var(--t-40); font-variant-numeric: tabular-nums; }
 
 /* ---- main grid: reasoning + log | defenses ---- */
 .p-investigator .inv-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; }
@@ -33,7 +33,7 @@
 
 /* blue agent log */
 .p-investigator .inv-log .line { padding: 5px 14px; }
-.p-investigator .inv-log .line .text { font-family: var(--mono); font-size: 10.5px; color: var(--t-56); }
+.p-investigator .inv-log .line .text { font-family: var(--mono); font-size: 11px; color: var(--t-56); }
 .p-investigator .inv-log .line.sys .text { color: var(--t-40); font-style: normal; }
 
 /* ---- active defenses rows ---- */
@@ -46,9 +46,9 @@
 
 /* ---- component health strip ---- */
 .p-investigator .inv-health { flex: 0 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
-.p-investigator .hs { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--glass); }
-.p-investigator .hs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--t-16); flex: 0 0 auto; transition: background 200ms var(--ease-out), box-shadow 200ms var(--ease-out); }
-.p-investigator .hs.on .hs-dot { background: var(--heat); box-shadow: 0 0 8px rgba(250, 93, 25, 0.6); }
+.p-investigator .hs { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.p-investigator .hs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--t-16); flex: 0 0 auto; transition: background 200ms var(--ease-out); }
+.p-investigator .hs.on .hs-dot { background: var(--pos); }
 .p-investigator .hs-name { font-size: 11.5px; font-weight: 500; color: var(--t-72); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-investigator .hs.stale .hs-name { color: var(--t-32); }
 .p-investigator .hs-age { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--t-40); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
